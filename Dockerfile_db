@@ -1,0 +1,13 @@
+FROM postgres:17.4-alpine
+#COPY create_fixtures.sql /docker-entrypoint-initdb.d/create_fixtures.sql
+RUN apk add curl supervisor
+
+COPY ./init-scripts/postgres /usr/local/bin/maintenance
+RUN chmod +x /usr/local/bin/maintenance/*
+RUN mv /usr/local/bin/maintenance/* /usr/local/bin && rmdir /usr/local/bin/maintenance
+RUN mkdir /backups
+
+COPY ./init-scripts/postgres/cron /usr/local/bin/cron
+COPY ./init-scripts/postgres/cron/postgres_cron.ini /etc/supervisor.d/postgres_cron.ini
+RUN (echo "0 23 * * * /usr/local/bin/backup.sh 2>&1") | crontab -
+ENTRYPOINT ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

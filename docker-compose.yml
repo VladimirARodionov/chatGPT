@@ -1,0 +1,40 @@
+name: ${COMPOSE_PROJECT_NAME}
+services:
+  postgres:
+    build:
+      dockerfile: Dockerfile_db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - PGUSER=${POSTGRES_USER}
+      - WEBDAV_LOGIN=${WEBDAV_LOGIN}
+      - WEBDAV_PASSWORD=${WEBDAV_PASSWORD}
+      - WEBDAV_URL=${WEBDAV_URL}
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}
+      - TZ=${TZ}
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pg_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  chatgptapp :
+    build:
+      dockerfile: Dockerfile_app
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./logs:/app/logs
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
