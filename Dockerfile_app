@@ -1,0 +1,33 @@
+# Use an official Python runtime as the base image
+FROM python:3.13-slim-bullseye
+
+# Install apt packages
+RUN apt-get update
+# && apt-get install -y --no-install-recommends \
+#    python3-venv \
+#    && rm -rf /var/lib/apt/lists/*
+
+ENV ENVIRONMENT=PRODUCTION
+#ENV PYTHONDONTWRITEBYTECODE=1
+#ENV PYTHONUNBUFFERED=1
+
+
+RUN addgroup --system app
+RUN adduser --system app --ingroup app
+
+
+USER app:app
+WORKDIR /app
+
+# Copy the rest of the application's source code into the container
+COPY --chown=app:app . .
+
+# Создаем виртуальное окружение в папке app
+RUN python -m venv venv
+ENV PATH="/app/venv/bin:$PATH"
+
+# Install the dependencies in the virtual environment
+RUN . /app/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt
+
+# Set the command to run the application using the venv python
+CMD ["python", "bot.py"]

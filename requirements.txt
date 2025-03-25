@@ -1,0 +1,9 @@
+aiogram
+aiohttp
+python-dotenv==1.0.0
+openai
+python-decouple==3.8
+SQLAlchemy==2.0.38
+alembic==1.14.1
+psycopg2-binary==2.9.10
+fluent.runtime==0.4.0

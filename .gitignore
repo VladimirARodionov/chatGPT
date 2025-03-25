@@ -57,9 +57,8 @@ cover/
 
 # Django stuff:
 *.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+logs.log.*
+local.db
 
 # Flask stuff:
 instance/
@@ -129,6 +128,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.dev
 .venv
 env/
 venv/
@@ -172,3 +172,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+/.idea/
+/*.iml
+/.gigaide/
+/backend/db.sqlite3
+/templates/*
+
+# PostgreSQL backups
+/pg_backups/*

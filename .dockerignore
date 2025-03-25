@@ -1,0 +1,15 @@
+.gitignore
+.git
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+.idea/
+.gigaide/
+**/.idea/
+*.iml
+Dockerfile_app
+*.log
+local.db
+logs.log.*
+.env.dev
