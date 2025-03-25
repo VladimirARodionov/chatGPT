@@ -1,7 +1,7 @@
 aiogram
 aiohttp
 python-dotenv==1.0.0
-openai==1.12.0
+openai
 python-decouple==3.8
 SQLAlchemy==2.0.38
 alembic==1.14.1
