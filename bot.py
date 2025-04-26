@@ -467,13 +467,17 @@ async def get_file_path_direct(file_id, bot_token):
     
     try:
         async with aiohttp.ClientSession() as session:
+            # Используем POST-запрос с JSON данными
+            logger.info(f"Отправляем запрос к Local Bot API: {url}")
             async with session.post(url, json={'file_id': file_id}) as response:
                 if response.status != 200:
+                    response_text = await response.text()
                     logger.error(f"Ошибка при получении информации о файле. Статус: {response.status}. "
-                                f"Ответ: {await response.text()}")
+                                f"Ответ: {response_text}")
                     return None
                 
                 json_response = await response.json()
+                logger.debug(f"Получен ответ от API: {json_response}")
                 
                 if not json_response.get('ok'):
                     logger.error(f"API вернул ошибку: {json_response}")
@@ -486,7 +490,11 @@ async def get_file_path_direct(file_id, bot_token):
                     logger.error(f"Не удалось получить путь к файлу: {json_response}")
                     return None
                 
+                # Пути могут приходить в разных форматах от API
                 logger.info(f"Получен путь к файлу: {file_path}")
+                
+                # Для Local Bot API может приходить полный путь к файлу
+                # Мы возвращаем его как есть, а обработка происходит в download_large_file_direct
                 return file_path
                 
     except Exception as e:
@@ -496,7 +504,7 @@ async def get_file_path_direct(file_id, bot_token):
 async def download_large_file_direct(file_id, destination, bot_token):
     """
     Загружает файл напрямую с сервера Local Bot API, обходя ограничения 
-    стандартного API Telegram. Поддерживает файлы до 50МБ.
+    стандартного API Telegram. Поддерживает файлы до 100МБ.
     
     Args:
         file_id: ID файла в Telegram
@@ -511,6 +519,18 @@ async def download_large_file_direct(file_id, destination, bot_token):
     if not file_path:
         logger.error(f"Не удалось получить путь к файлу {file_id}")
         return False
+    
+    # Обрабатываем путь к файлу (убираем абсолютный путь если он есть)
+    # В Local Bot API путь может быть абсолютным, но в URL нужен относительный
+    if file_path.startswith('/'):
+        # Проверяем, содержит ли путь специфичную директорию Local Bot API
+        bot_api_dir = f"/var/lib/telegram-bot-api/{bot_token}/"
+        if bot_api_dir in file_path:
+            # Извлекаем только часть пути после токена бота
+            file_path = file_path.split(bot_api_dir)[1]
+        else:
+            # Просто убираем начальный слеш для формирования корректного URL
+            file_path = file_path.lstrip('/')
     
     # Формируем URL для загрузки файла напрямую
     url = f"{LOCAL_BOT_API}/file/bot{bot_token}/{file_path}"
