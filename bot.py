@@ -105,18 +105,6 @@ async def set_commands():
     """Установка команд бота в меню"""
     await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeDefault())
 
-def get_main_keyboard():
-    """Создает клавиатуру главного меню"""
-    builder = ReplyKeyboardBuilder()
-    builder.row(
-        types.KeyboardButton(text="💬 Помощь"),
-        types.KeyboardButton(text="📊 Статус")
-    )
-    builder.row(
-        types.KeyboardButton(text="🎤 Модели Whisper"),
-        types.KeyboardButton(text="ℹ️ О боте")
-    )
-    return builder.as_markup(resize_keyboard=True)
 
 @contextmanager
 def get_db_session():
@@ -344,13 +332,6 @@ async def cmd_start(message: types.Message):
         "Используй меню для доступа к основным функциям."
     )
 
-@dp.message(Command("menu"))
-async def cmd_menu(message: types.Message):
-    await message.answer(
-        "Главное меню бота:",
-        reply_markup=get_main_keyboard()
-    )
-
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_id = message.from_user.id
@@ -421,7 +402,6 @@ async def cmd_help(message: types.Message):
 
 <b>Команды бота:</b>
 /start - Начать общение с ботом
-/menu - Показать главное меню
 /status - Проверить лимит сообщений
 /models - Показать список моделей Whisper
 /help - Показать эту справку
