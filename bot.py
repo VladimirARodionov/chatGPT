@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, BotCommand, BotCommandScopeDefault
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from openai import OpenAI
 from sqlalchemy.orm import Session
