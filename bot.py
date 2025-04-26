@@ -600,7 +600,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
             logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
     elif file_path.startswith('/var/lib/telegram-bot-api'):
         # Пытаемся использовать настраиваемый путь к файлам Local Bot API
-        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', LOCAL_BOT_API_FILES_PATH)
+        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', pathlib.Path(__file__).resolve().parent / LOCAL_BOT_API_FILES_PATH)
         
         if os.path.isfile(bot_specific_path) and os.access(bot_specific_path, os.R_OK):
             try:
@@ -655,8 +655,6 @@ async def download_large_file_direct(file_id, destination, bot_token):
         alt_paths = [
             # Попробуем несколько вариантов монтирования Docker-томов
             file_path.replace('/var/lib/telegram-bot-api', '/data/telegram-bot-api'),
-            file_path.replace('/var/lib/telegram-bot-api', '/mnt/telegram-bot-api'),
-            file_path.replace('/var/lib/telegram-bot-api', '/telegram-bot-api'),
             # Добавьте другие возможные пути здесь
         ]
         
