@@ -1212,7 +1212,7 @@ async def handle_audio(message: types.Message):
         
         # Предсказываем время обработки
         estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
-        estimated_time_str = str(timedelta(seconds=estimated_time))
+        estimated_time_str = str(estimated_time)
         
         # Уведомляем пользователя о постановке в очередь
         file_size_mb = file_size / (1024 * 1024)
@@ -1224,7 +1224,7 @@ async def handle_audio(message: types.Message):
             model_info = f"Модель: {smaller_model} (автоматически выбрана для большого файла вместо {WHISPER_MODEL})"
             # Обновляем время с учетом фактически используемой модели
             estimated_time = predict_processing_time(file_path, smaller_model)
-            estimated_time_str = str(timedelta(seconds=estimated_time))
+            estimated_time_str = str(estimated_time)
         
         await processing_msg.edit_text(
             f"Аудиофайл успешно загружен и поставлен в очередь на обработку.\n"
