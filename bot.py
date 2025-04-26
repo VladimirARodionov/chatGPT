@@ -3,6 +3,7 @@ import asyncio
 import pathlib
 import os
 from datetime import datetime
+import re
 
 from alembic import command
 from alembic.config import Config
@@ -11,6 +12,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, BotCommand, BotCommandScopeDefault
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 from openai import OpenAI
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -36,14 +38,32 @@ logging.getLogger('aiogram.event').propagate = False
 
 logger = logging.getLogger(__name__)
 
+# Получаем URL локального Bot API сервера из .env файла
+LOCAL_BOT_API = env_config.get('LOCAL_BOT_API', None)
+
 # Инициализация бота и диспетчера
-bot = Bot(token=env_config.get('TELEGRAM_TOKEN'))
+if LOCAL_BOT_API:
+    bot = Bot(token=env_config.get('TELEGRAM_TOKEN'), base_url=LOCAL_BOT_API)
+    logger.info(f'Используется локальный Telegram Bot API сервер: {LOCAL_BOT_API}')
+else:
+    bot = Bot(token=env_config.get('TELEGRAM_TOKEN'))
 dp = Dispatcher()
 
 # Настройки для Whisper
 WHISPER_MODEL = env_config.get('WHISPER_MODEL', 'base')
 USE_LOCAL_WHISPER = env_config.get('USE_LOCAL_WHISPER', 'True').lower() in ('true', '1', 'yes')
 WHISPER_MODELS_DIR = env_config.get('WHISPER_MODELS_DIR', 'whisper_models')
+
+# Ограничения для Telegram
+MAX_MESSAGE_LENGTH = 4096  # максимальная длина сообщения в Telegram
+MAX_CAPTION_LENGTH = 1024  # максимальная длина подписи к файлу
+
+# Устанавливаем лимиты в зависимости от использования локального Bot API
+if LOCAL_BOT_API:
+    MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2000 МБ для локального Bot API
+    logger.info(f'Используется увеличенный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
+else:
+    MAX_FILE_SIZE = 20 * 1024 * 1024    # 20 МБ для обычного Bot API
 
 # Директории для файлов
 TEMP_AUDIO_DIR = "temp_audio"
@@ -141,12 +161,142 @@ def save_transcription_to_file(text, user_id):
     
     return filename
 
+def split_text_into_chunks(text, max_length=MAX_MESSAGE_LENGTH):
+    """Разделяет длинный текст на части с учетом границ предложений
+    
+    Args:
+        text: Исходный текст
+        max_length: Максимальная длина каждой части
+        
+    Returns:
+        Список частей текста
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    
+    # Регулярное выражение для поиска конца предложения
+    sentence_end = re.compile(r'[.!?]\s+')
+    
+    # Сначала разбиваем по предложениям
+    sentences = sentence_end.split(text)
+    
+    # Если есть очень длинные предложения, разбиваем их дополнительно
+    for i, sentence in enumerate(sentences):
+        if len(sentence) > max_length:
+            # Если предложение слишком длинное, разбиваем его по словам
+            words = sentence.split()
+            current_chunk = ""
+            
+            for word in words:
+                if len(current_chunk) + len(word) + 1 <= max_length:
+                    if current_chunk:
+                        current_chunk += " "
+                    current_chunk += word
+                else:
+                    chunks.append(current_chunk)
+                    current_chunk = word
+            
+            if current_chunk:
+                chunks.append(current_chunk)
+        else:
+            # Добавляем точку обратно, если это не последнее предложение
+            end_mark = ". " if i < len(sentences) - 1 else ""
+            
+            # Проверяем, можно ли добавить это предложение к последнему чанку
+            if chunks and len(chunks[-1]) + len(sentence) + len(end_mark) <= max_length:
+                chunks[-1] += sentence + end_mark
+            else:
+                chunks.append(sentence + end_mark)
+    
+    return chunks
+
+async def send_file_safely(message, file_path, caption=None):
+    """Безопасно отправляет файл с обработкой ошибок и разделением больших файлов
+    
+    Args:
+        message: Исходное сообщение для ответа
+        file_path: Путь к файлу
+        caption: Подпись к файлу
+        
+    Returns:
+        Успешность отправки
+    """
+    try:
+        file_size = os.path.getsize(file_path)
+        
+        if file_size > MAX_FILE_SIZE:
+            # Файл слишком большой, разделяем его на части
+            await message.answer("Файл слишком большой для отправки, разделяю на части...")
+            
+            # Читаем содержимое файла
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Разделяем содержимое на части
+            chunks = split_text_into_chunks(content, MAX_MESSAGE_LENGTH - 100)  # Оставляем запас
+            
+            # Создаем отдельные файлы для каждой части
+            for i, chunk in enumerate(chunks):
+                part_filename = f"{os.path.splitext(file_path)[0]}_part{i+1}{os.path.splitext(file_path)[1]}"
+                
+                with open(part_filename, 'w', encoding='utf-8') as f:
+                    f.write(chunk)
+                
+                # Формируем подпись для каждой части
+                part_caption = f"Часть {i+1}/{len(chunks)}"
+                if i == 0 and caption:
+                    part_caption = f"{caption}\n\n{part_caption}"
+                
+                # Отправляем файл
+                await message.answer_document(
+                    FSInputFile(part_filename),
+                    caption=part_caption[:MAX_CAPTION_LENGTH]
+                )
+            
+            return True
+        else:
+            # Обычная отправка файла
+            if caption and len(caption) > MAX_CAPTION_LENGTH:
+                caption = caption[:MAX_CAPTION_LENGTH-3] + "..."
+                
+            await message.answer_document(
+                FSInputFile(file_path),
+                caption=caption
+            )
+            return True
+            
+    except TelegramBadRequest as e:
+        if "file is too big" in str(e).lower():
+            # Если все равно получаем ошибку о большом размере файла
+            logger.error(f"Файл {file_path} слишком большой для отправки через Telegram API: {e}")
+            await message.answer(
+                "Файл слишком большой для отправки через Telegram. "
+                "Попробуйте транскрибировать аудио меньшей длительности."
+            )
+        else:
+            logger.exception(f"Ошибка Telegram при отправке файла: {e}")
+            await message.answer(f"Ошибка при отправке файла: {str(e)}")
+        return False
+    except Exception as e:
+        logger.exception(f"Ошибка при отправке файла: {e}")
+        await message.answer(f"Произошла ошибка при отправке файла: {str(e)}")
+        return False
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "Привет! Я бот, который может общаться с ChatGPT и транскрибировать аудио.\n\n"
         "Отправь мне сообщение или аудиофайл, и я обработаю его. "
         "Используй меню для доступа к основным функциям."
+    )
+
+@dp.message(Command("menu"))
+async def cmd_menu(message: types.Message):
+    await message.answer(
+        "Главное меню бота:",
+        reply_markup=get_main_keyboard()
     )
 
 @dp.message(Command("status"))
@@ -244,8 +394,45 @@ async def button_about(message: types.Message):
 async def download_voice(file, destination):
     """Скачивание голосового сообщения"""
     try:
+        # Проверяем, существует ли директория
+        directory = os.path.dirname(destination)
+        if not os.path.exists(directory):
+            try:
+                os.makedirs(directory, exist_ok=True)
+                logger.info(f"Создана директория: {directory}")
+            except PermissionError:
+                logger.error(f"Нет прав для создания директории: {directory}")
+                return False
+        
+        # Проверяем права на запись в директорию
+        if not os.access(directory, os.W_OK):
+            logger.error(f"Нет прав на запись в директорию: {directory}")
+            return False
+            
+        # Скачиваем файл
         await bot.download(file, destination=destination)
-        return True
+        
+        # Проверяем, скачался ли файл
+        if os.path.exists(destination):
+            logger.info(f"Файл успешно скачан: {destination}")
+            return True
+        else:
+            logger.error(f"Файл не был скачан: {destination}")
+            return False
+            
+    except PermissionError as e:
+        logger.error(f"Ошибка доступа при скачивании файла: {e}")
+        # Отладочная информация о правах
+        try:
+            directory = os.path.dirname(destination)
+            logger.error(f"Права доступа к директории {directory}: {oct(os.stat(directory).st_mode)[-3:]}")
+            logger.error(f"Владелец директории: {os.stat(directory).st_uid}:{os.stat(directory).st_gid}")
+            current_user = os.getuid()
+            current_group = os.getgid()
+            logger.error(f"Текущий пользователь: {current_user}:{current_group}")
+        except Exception as debug_e:
+            logger.error(f"Ошибка при получении отладочной информации: {debug_e}")
+        return False
     except Exception as e:
         logger.exception(f"Ошибка при скачивании файла: {e}")
         return False
@@ -290,11 +477,11 @@ async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_audio(message: types.Message):
     user_id = message.from_user.id
-
+    
     if not USE_LOCAL_WHISPER and not check_message_limit(user_id):
         await message.answer("Вы достигли дневного лимита в 50 сообщений. Попробуйте завтра!")
         return
-
+    
     # Отправляем сообщение о начале обработки
     processing_msg = await message.answer("Загружаю и обрабатываю аудио...")
     
@@ -307,16 +494,49 @@ async def handle_audio(message: types.Message):
         if message.audio and message.audio.file_name:
             file_name = message.audio.file_name
         
+        # Получаем информацию о файле
+        file = await bot.get_file(file_id)
+        file_size = file.file_size
+        
+        # Проверяем размер файла
+        if file_size > MAX_FILE_SIZE:
+            await processing_msg.edit_text(
+                f"⚠️ Файл слишком большой ({file_size/1024/1024:.1f} МБ). "
+                f"Максимальный размер файла для обработки: {MAX_FILE_SIZE/1024/1024:.1f} МБ.\n\n"
+                f"Пожалуйста, отправьте аудиофайл меньшего размера или разделите его на части."
+            )
+            return
+        
         # Путь для сохранения аудио
         file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
-        file = await bot.get_file(file_id)
         
         # Скачиваем файл
         await processing_msg.edit_text("Скачиваю аудиофайл...")
-        if not await download_voice(file, file_path):
-            await processing_msg.edit_text("Ошибка при скачивании аудиофайла.")
+        try:
+            await bot.download(file, destination=file_path)
+        except TelegramBadRequest as e:
+            if "file is too big" in str(e).lower():
+                await processing_msg.edit_text(
+                    f"⚠️ Ошибка при скачивании: файл слишком большой для API Telegram (> 20 МБ).\n\n"
+                    f"Размер файла: {file_size/1024/1024:.1f} МБ\n"
+                    f"Ограничение Telegram: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
+                    f"Пожалуйста, используйте аудиофайл меньшего размера."
+                )
+                logger.error(f"Ошибка при скачивании файла - слишком большой размер: {e}")
+            else:
+                await processing_msg.edit_text(f"Ошибка при скачивании аудиофайла: {str(e)}")
+                logger.exception(f"Ошибка Telegram при скачивании: {e}")
+            return
+        except Exception as e:
+            await processing_msg.edit_text(f"Ошибка при скачивании аудиофайла: {str(e)}")
+            logger.exception(f"Ошибка при скачивании файла: {e}")
             return
         
+        # Проверяем, что файл успешно скачан
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            await processing_msg.edit_text("Ошибка: не удалось скачать аудиофайл или файл пустой.")
+            return
+            
         # Транскрибируем аудио
         await processing_msg.edit_text(f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...")
         transcription = await transcribe_audio(file_path)
@@ -326,18 +546,30 @@ async def handle_audio(message: types.Message):
         
         # Формируем текстовое сообщение
         message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
-        # Если текст слишком длинный, обрезаем его для предпросмотра
-        preview_text = transcription[:1000] + "..." if len(transcription) > 1000 else transcription
-        message_text += preview_text
         
-        # Отправляем текстовое сообщение
-        await processing_msg.edit_text(message_text)
-        
-        # Отправляем файл с полной транскрибацией
-        await message.answer_document(
-            FSInputFile(transcript_file_path),
-            caption="Полная транскрибация аудио"
-        )
+        # Если текст слишком длинный, разбиваем на части
+        if len(transcription) > MAX_MESSAGE_LENGTH - len(message_text):
+            # Отправляем превью транскрибации
+            preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
+            preview_text = transcription[:preview_length] + "...\n\n(полный текст в файле)"
+            await processing_msg.edit_text(message_text + preview_text)
+            
+            # Отправляем файл с полной транскрибацией безопасным способом
+            await send_file_safely(
+                message,
+                transcript_file_path,
+                caption="Полная транскрибация аудио"
+            )
+        else:
+            # Для коротких транскрибаций просто отправляем весь текст
+            await processing_msg.edit_text(message_text + transcription)
+            
+            # Отправляем файл для удобства
+            await send_file_safely(
+                message,
+                transcript_file_path,
+                caption="Транскрибация аудио в виде файла"
+            )
         
         # Удаляем временные файлы
         try:
@@ -347,8 +579,18 @@ async def handle_audio(message: types.Message):
         except Exception as e:
             logger.exception(f"Ошибка при удалении временных файлов: {e}")
         
+    except TelegramBadRequest as e:
+        if "file is too big" in str(e).lower():
+            await processing_msg.edit_text(
+                "⚠️ Ошибка: Файл слишком большой для обработки в Telegram. "
+                "Пожалуйста, отправьте аудиофайл меньшего размера (до 20 МБ)."
+            )
+        else:
+            await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
+        logger.exception(f"Ошибка Telegram при обработке аудио: {e}")
     except Exception as e:
         await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
+        logger.exception(f"Ошибка при обработке аудио: {e}")
 
 @dp.message()
 async def handle_message(message: types.Message):
@@ -375,8 +617,22 @@ async def handle_message(message: types.Message):
             ]
         )
         
-        # Отправляем ответ пользователю
-        await processing_msg.edit_text(response.choices[0].message.content)
+        # Получаем текст ответа
+        response_text = response.choices[0].message.content
+        
+        # Если ответ слишком длинный, разбиваем на части
+        if len(response_text) > MAX_MESSAGE_LENGTH:
+            chunks = split_text_into_chunks(response_text)
+            
+            # Обновляем первое сообщение
+            await processing_msg.edit_text(chunks[0])
+            
+            # Отправляем остальные части
+            for chunk in chunks[1:]:
+                await message.answer(chunk)
+        else:
+            # Отправляем ответ пользователю
+            await processing_msg.edit_text(response_text)
         
     except Exception as e:
         logger.exception(f"Произошла ошибка при обработке сообщения: {e}")

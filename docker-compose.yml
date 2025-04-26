@@ -22,22 +22,54 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  chatgptapp :
+
+  telegram-bot-api:
+    build:
+      context: .
+      dockerfile: Dockerfile_api
+    ports:
+      - "${API_PORT:-8081}:8081"
+    environment:
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      - API_PORT=8082
+      - TZ=${TZ}
+    volumes:
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+      - ./logs/telegram-bot-api:/var/log/telegram-bot-api
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  chatgptapp:
     build:
       dockerfile: Dockerfile_app
+    user: app
     env_file:
       - .env
     environment:
       - TZ=${TZ}
+      - LOCAL_BOT_API=http://telegram-bot-api:8081
     volumes:
-      - ./logs:/app/logs
-      - ./temp_audio:/app/temp_audio
-      - ./transcriptions:/app/transcriptions
-      - ./whisper_models:/app/whisper_models
+      - app_logs:/app/logs
+      - app_temp_audio:/app/temp_audio
+      - app_transcriptions:/app/transcriptions
+      - app_whisper_models:/app/whisper_models
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
+      telegram-bot-api:
+        condition: service_healthy
 
 volumes:
   postgres_data:
+  telegram_bot_api_data:
+  app_logs:
+  app_temp_audio:
+  app_transcriptions:
+  app_whisper_models:

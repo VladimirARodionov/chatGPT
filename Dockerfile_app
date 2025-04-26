@@ -2,33 +2,52 @@
 FROM python:3.13-slim-bullseye
 
 # Install apt packages
-RUN apt-get update
-RUN apt-get install -y git ffmpeg
-# && apt-get install -y --no-install-recommends \
-#    python3-venv \
-#    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y \
+    git \
+    ffmpeg \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV ENVIRONMENT=PRODUCTION
-#ENV PYTHONDONTWRITEBYTECODE=1
-#ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
+# Создаем пользователя для запуска приложения
+RUN addgroup --system app && \
+    adduser --system app --ingroup app
 
-RUN addgroup --system app
-RUN adduser --system app --ingroup app
-
-
-USER app:app
+# Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Copy the rest of the application's source code into the container
-COPY --chown=app:app . .
+# Копируем только файлы зависимостей сначала для кэширования
+COPY --chown=app:app requirements.txt .
 
 # Создаем виртуальное окружение в папке app
 RUN python -m venv venv
 ENV PATH="/app/venv/bin:$PATH"
 
-# Install the dependencies in the virtual environment
-RUN . /app/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt
+# Устанавливаем зависимости в виртуальной среде
+RUN . /app/venv/bin/activate && \
+    pip install --upgrade pip && \
+    pip install -r requirements.txt
 
-# Set the command to run the application using the venv python
+# Создаем и настраиваем директории для данных с правильными правами
+RUN mkdir -p /app/logs /app/temp_audio /app/transcriptions /app/whisper_models && \
+    chown -R app:app /app && \
+    chmod -R 755 /app/logs /app/temp_audio /app/transcriptions /app/whisper_models
+
+# Копируем остальные файлы приложения
+COPY --chown=app:app . .
+
+# Проверяем соединение с Local API Server перед запуском
+COPY --chown=app:app docker-healthcheck.sh /app/docker-healthcheck.sh
+RUN chmod +x /app/docker-healthcheck.sh
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 CMD ["./docker-healthcheck.sh"]
+
+# Переключаемся на пользователя app
+USER app:app
+
+# Запускаем приложение с помощью Python из виртуальной среды
 CMD ["python", "bot.py"]
