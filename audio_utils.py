@@ -226,6 +226,9 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
         # Если файл большой, используем более экономичный подход
         is_large_file = file_size_mb > 20  # Файлы больше 20 МБ считаем большими
         
+        # Проверяем, нужно ли использовать модель меньшего размера
+        should_switch, smaller_model = should_use_smaller_model(file_size_mb, model_name)
+        
         if is_large_file:
             logger.info(f"Обрабатываем большой аудио файл ({file_size_mb:.2f} МБ), применяем оптимизации для памяти")
             
@@ -253,10 +256,10 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             logger.info(f"Применяем оптимизации для большого файла: {transcribe_options}")
             
             # Можно также переключиться на более легкую модель, если текущая слишком тяжелая
-            if model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
-                logger.info(f"Для большого файла временно переключаемся с модели {model_name} на small для экономии памяти")
+            if should_switch:
+                logger.info(f"Для большого файла временно переключаемся с модели {model_name} на {smaller_model} для экономии памяти")
                 try:
-                    model = get_whisper_model("small")
+                    model = get_whisper_model(smaller_model)
                     if model is None:
                         logger.error("Не удалось загрузить облегченную модель для большого файла")
                         return None
@@ -313,8 +316,11 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             
             # Добавляем информацию о том, что модель была переключена
             actual_model_used = model_name
-            if is_large_file and model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
-                actual_model_used = "small"
+            if is_large_file:
+                # Используем функцию для определения модели
+                was_switched, smaller_model_name = should_use_smaller_model(file_size_mb, model_name)
+                if was_switched:
+                    actual_model_used = smaller_model_name
                 
             # Добавляем метаданные о транскрибации
             result["whisper_model"] = actual_model_used
@@ -367,3 +373,29 @@ async def convert_audio_format(input_file, output_format="wav"):
     except Exception as e:
         logger.exception(f"Ошибка при конвертации аудио: {e}")
         raise 
+
+def should_use_smaller_model(file_size_mb, model_name):
+    """
+    Определяет, требуется ли переключение на модель меньшего размера
+    для данного размера файла и модели.
+    
+    Args:
+        file_size_mb: Размер файла в МБ
+        model_name: Название текущей модели
+    
+    Returns:
+        (bool, str): Кортеж (нужно ли менять модель, название новой модели)
+    """
+    # Модели, требующие много памяти
+    heavy_models = ["medium", "large", "large-v2", "large-v3", "turbo"]
+    
+    # Пороги размера файла для переключения на модель меньшего размера
+    file_size_threshold = 20  # МБ
+    
+    # Проверяем, нужно ли переключаться на меньшую модель
+    if file_size_mb > file_size_threshold and model_name in heavy_models:
+        # По умолчанию используем small для больших файлов
+        return True, "small"
+    
+    # Модель менять не нужно
+    return False, model_name 

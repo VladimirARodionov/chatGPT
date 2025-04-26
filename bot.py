@@ -22,7 +22,7 @@ import aiohttp
 
 from create_bot import db, env_config
 from models import UserMessageCount
-from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models
+from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models, should_use_smaller_model
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -888,11 +888,13 @@ async def background_audio_processor():
                     # Проверяем размер файла для предупреждения о возможном переключении модели
                     try:
                         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                        if file_size_mb > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                        should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
+                        
+                        if should_switch:
                             await processing_msg.edit_text(
                                 f"Транскрибирую аудио...\n\n"
                                 f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
-                                f"поэтому вместо модели {WHISPER_MODEL} будет использована модель small для оптимизации памяти.\n\n"
+                                f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
                                 f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
                             )
                     except Exception as e:
@@ -918,8 +920,11 @@ async def background_audio_processor():
                                 
                                 # Определяем, какая модель используется
                                 current_model = WHISPER_MODEL
-                                if os.path.getsize(file_path) / (1024 * 1024) > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
-                                    current_model = "small (автоматически выбрана для большого файла)"
+                                file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
+                                should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
+                                
+                                if should_switch:
+                                    current_model = f"{smaller_model} (автоматически выбрана для большого файла)"
                                 
                                 status_message = (
                                     f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
@@ -976,7 +981,7 @@ async def background_audio_processor():
                     if isinstance(transcription, dict) and "whisper_model" in transcription:
                         used_model = transcription.get("whisper_model")
                         
-                        # Если использована модель отличается от заданной, добавляем информацию
+                        # Если использованная модель отличается от заданной, добавляем информацию
                         if used_model != WHISPER_MODEL:
                             processing_time = transcription.get("processing_time", 0)
                             processing_time_str = f" (время обработки: {processing_time:.1f} сек)" if processing_time > 0 else ""
@@ -984,9 +989,11 @@ async def background_audio_processor():
                     else:
                         # Если информации нет в результате, используем приблизительную проверку по размеру файла
                         file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
-                        if file_size_mb > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
-                            used_model = "small"
-                            message_text += f"ℹ️ Для обработки использована модель small вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
+                        should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
+                        
+                        if should_switch:
+                            used_model = smaller_model
+                            message_text += f"ℹ️ Для обработки использована модель {smaller_model} вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
                     
                     # Получаем текст транскрибации
                     transcription_text = transcription
