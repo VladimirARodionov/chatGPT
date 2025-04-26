@@ -176,7 +176,7 @@ def save_transcription_to_file(text, user_id):
     filename = f"{TRANSCRIPTION_DIR}/transcription_{user_id}_{timestamp}.txt"
     
     with open(filename, "w", encoding="utf-8") as file:
-        file.write(text)
+        file.write(str(text))
     
     return filename
 
@@ -600,7 +600,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
             logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
     elif file_path.startswith('/var/lib/telegram-bot-api'):
         # Пытаемся использовать настраиваемый путь к файлам Local Bot API
-        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', pathlib.Path(__file__).resolve().parent / LOCAL_BOT_API_FILES_PATH)
+        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', (pathlib.Path(__file__).resolve().parent / LOCAL_BOT_API_FILES_PATH))
         
         if os.path.isfile(bot_specific_path) and os.access(bot_specific_path, os.R_OK):
             try:
