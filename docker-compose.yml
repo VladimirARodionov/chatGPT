@@ -28,7 +28,7 @@ services:
       context: .
       dockerfile: Dockerfile_api
     ports:
-      - "${API_PORT:-8081}:8081"
+      - "${API_PORT:-8082}:8082"
     environment:
       - API_ID=${API_ID}
       - API_HASH=${API_HASH}
@@ -39,7 +39,7 @@ services:
       - ./logs/telegram-bot-api:/var/log/telegram-bot-api
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8081/ || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8082/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -53,7 +53,7 @@ services:
       - .env
     environment:
       - TZ=${TZ}
-      - LOCAL_BOT_API=http://telegram-bot-api:8081
+      - LOCAL_BOT_API=${LOCAL_BOT_API}
     volumes:
       - app_logs:/app/logs
       - app_temp_audio:/app/temp_audio
