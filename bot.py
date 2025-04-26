@@ -60,7 +60,6 @@ BOT_COMMANDS = [
     BotCommand(command="help", description="Показать справку"),
     BotCommand(command="status", description="Проверить лимит сообщений"),
     BotCommand(command="models", description="Показать список моделей Whisper"),
-    BotCommand(command="menu", description="Показать главное меню")
 ]
 
 async def set_commands():
