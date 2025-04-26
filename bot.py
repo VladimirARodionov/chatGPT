@@ -2,10 +2,8 @@ import logging.config
 import asyncio
 import pathlib
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
-import queue
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from alembic import command
@@ -520,7 +518,7 @@ async def background_audio_processor():
                             # Обновляем сообщение о статусе каждые 30 секунд
                             elapsed = (datetime.now() - start_time).total_seconds()
                             if elapsed > 0 and elapsed % 30 < 1:  # примерно каждые 30 секунд
-                                time_str = str(datetime.timedelta(seconds=int(elapsed)))
+                                time_str = str(timedelta(seconds=int(elapsed)))
                                 await processing_msg.edit_text(
                                     f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                     f"⏱ Прошло времени: {time_str}\n"
@@ -629,14 +627,33 @@ async def handle_audio(message: types.Message):
             file_name = message.audio.file_name
         
         # Получаем информацию о файле
-        file = await bot.get_file(file_id)
-        file_size = file.file_size
+        try:
+            file = await bot.get_file(file_id)
+            file_size = file.file_size
+        except TelegramBadRequest as e:
+            if "file is too big" in str(e).lower():
+                # Если ошибка возникает уже на этапе получения информации о файле
+                await processing_msg.edit_text(
+                    f"⚠️ Файл слишком большой для API Telegram.\n\n"
+                    f"Ограничение Telegram Bot API: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
+                    f"Даже если вы используете Local Bot API Server, существуют ограничения "
+                    f"на размер файлов, которые можно получить через API.\n\n"
+                    f"Пожалуйста, попробуйте:\n"
+                    f"1. Использовать аудиофайл меньшего размера\n"
+                    f"2. Разделить длинную запись на несколько частей\n"
+                    f"3. Сжать аудиофайл перед отправкой"
+                )
+                logger.error(f"Ошибка при получении информации о файле - слишком большой размер: {e}")
+                return
+            else:
+                raise  # Передаем другие ошибки дальше
         
         # Проверяем размер файла
         if file_size > MAX_FILE_SIZE:
             await processing_msg.edit_text(
-                f"⚠️ Файл слишком большой ({file_size/1024/1024:.1f} МБ). "
-                f"Максимальный размер файла для обработки: {MAX_FILE_SIZE/1024/1024:.1f} МБ.\n\n"
+                f"⚠️ Файл слишком большой ({file_size/1024/1024:.1f} МБ).\n\n"
+                f"Максимальный размер файла для обработки: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
+                f"{'Вы используете Local Bot API Server, но ' if LOCAL_BOT_API else ''}"
                 f"Пожалуйста, отправьте аудиофайл меньшего размера или разделите его на части."
             )
             return
@@ -651,10 +668,15 @@ async def handle_audio(message: types.Message):
         except TelegramBadRequest as e:
             if "file is too big" in str(e).lower():
                 await processing_msg.edit_text(
-                    f"⚠️ Ошибка при скачивании: файл слишком большой для API Telegram (> 20 МБ).\n\n"
+                    f"⚠️ Ошибка при скачивании: файл слишком большой для API Telegram.\n\n"
                     f"Размер файла: {file_size/1024/1024:.1f} МБ\n"
-                    f"Ограничение Telegram: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
-                    f"Пожалуйста, используйте аудиофайл меньшего размера."
+                    f"Ограничение {'Local Bot API' if LOCAL_BOT_API else 'Telegram Bot API'}: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
+                    f"Даже при использовании Local Bot API, существуют ограничения на работу с большими файлами.\n\n"
+                    f"Рекомендации:\n"
+                    f"• Используйте файл меньшего размера\n"
+                    f"• Сократите длительность аудио\n"
+                    f"• Разделите длинное аудио на несколько частей\n"
+                    f"• Попробуйте конвертировать файл в формат с меньшим битрейтом"
                 )
                 logger.error(f"Ошибка при скачивании файла - слишком большой размер: {e}")
             else:
@@ -689,6 +711,20 @@ async def handle_audio(message: types.Message):
         await audio_task_queue.put((message, file_path, processing_msg, user_id, file_name))
         logger.info(f"Аудиофайл от пользователя {user_id} добавлен в очередь на обработку. Текущий размер очереди: {audio_task_queue.qsize()}")
         
+    except TelegramBadRequest as e:
+        if "file is too big" in str(e).lower():
+            await processing_msg.edit_text(
+                f"⚠️ Ошибка: Файл слишком большой для обработки в Telegram.\n\n"
+                f"Рекомендации:\n"
+                f"• Используйте файл меньшего размера (до {MAX_FILE_SIZE/1024/1024:.1f} МБ)\n"
+                f"• Сократите длительность аудио\n"
+                f"• Разделите длинное аудио на несколько частей\n"
+                f"• {'Перезапустите бота, если вы используете Local Bot API' if LOCAL_BOT_API else 'Настройте Local Bot API для работы с файлами до 2 ГБ'}"
+            )
+            logger.error(f"Ошибка 'file is too big' при обработке аудио: {e}")
+        else:
+            await processing_msg.edit_text(f"Произошла ошибка при подготовке аудио к обработке: {str(e)}")
+            logger.exception(f"Ошибка Telegram при обработке аудио: {e}")
     except Exception as e:
         await processing_msg.edit_text(f"Произошла ошибка при подготовке аудио к обработке: {str(e)}")
         logger.exception(f"Ошибка при обработке аудио: {e}")
