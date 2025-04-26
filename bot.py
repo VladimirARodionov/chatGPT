@@ -4,6 +4,9 @@ import pathlib
 import os
 from datetime import datetime
 import re
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from alembic import command
 from alembic.config import Config
@@ -81,6 +84,14 @@ BOT_COMMANDS = [
     BotCommand(command="status", description="Проверить лимит сообщений"),
     BotCommand(command="models", description="Показать список моделей Whisper"),
 ]
+
+# Создаем очередь задач для обработки аудио в фоновом режиме
+audio_task_queue = asyncio.Queue()
+# Пул потоков для CPU-интенсивных операций
+thread_executor = ThreadPoolExecutor(max_workers=3)
+
+# Флаг для отслеживания статуса обработчика очереди
+background_worker_running = False
 
 async def set_commands():
     """Установка команд бота в меню"""
@@ -474,6 +485,129 @@ async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
         logger.exception(f"Ошибка при транскрибации: {e}")
         raise
 
+async def background_audio_processor():
+    """Фоновый обработчик очереди аудиофайлов"""
+    global background_worker_running
+    background_worker_running = True
+    logger.info("Запущен фоновый обработчик аудиофайлов")
+    
+    try:
+        while True:
+            try:
+                # Получаем задачу из очереди (с таймаутом, чтобы можно было корректно завершить поток)
+                task = await asyncio.wait_for(audio_task_queue.get(), timeout=1.0)
+                
+                try:
+                    # Распаковываем данные задачи
+                    message, file_path, processing_msg, user_id, file_name = task
+                    
+                    # Сообщаем о начале транскрибации
+                    await processing_msg.edit_text(f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\nЭто может занять некоторое время в зависимости от длины аудио. Вы можете продолжать использовать бота.")
+                    
+                    # Запускаем транскрибацию в отдельном потоке, чтобы не блокировать event loop
+                    loop = asyncio.get_event_loop()
+                    try:
+                        # Создаем объект будущего результата
+                        future = loop.run_in_executor(
+                            thread_executor,
+                            # Оборачиваем асинхронную функцию в синхронную
+                            lambda fp=file_path: asyncio.run(transcribe_audio(fp))
+                        )
+                        
+                        # Ожидаем результат с периодическим обновлением статуса
+                        start_time = datetime.now()
+                        while not future.done():
+                            # Обновляем сообщение о статусе каждые 30 секунд
+                            elapsed = (datetime.now() - start_time).total_seconds()
+                            if elapsed > 0 and elapsed % 30 < 1:  # примерно каждые 30 секунд
+                                time_str = str(datetime.timedelta(seconds=int(elapsed)))
+                                await processing_msg.edit_text(
+                                    f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
+                                    f"⏱ Прошло времени: {time_str}\n"
+                                    f"Файл: {file_name}\n\n"
+                                    f"Вы можете продолжать использовать бота для других задач."
+                                )
+                            
+                            # Небольшая пауза, чтобы не нагружать процессор
+                            await asyncio.sleep(1)
+                        
+                        # Получаем результат
+                        transcription = await future
+                        
+                    except Exception as e:
+                        logger.exception(f"Ошибка при асинхронной транскрибации: {e}")
+                        raise
+                    
+                    # Сохраняем транскрибацию в файл
+                    transcript_file_path = save_transcription_to_file(transcription, user_id)
+                    
+                    # Формируем текстовое сообщение
+                    message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
+                    
+                    # Если текст слишком длинный, разбиваем на части
+                    if len(transcription) > MAX_MESSAGE_LENGTH - len(message_text):
+                        # Отправляем превью транскрибации
+                        preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
+                        preview_text = transcription[:preview_length] + "...\n\n(полный текст в файле)"
+                        await processing_msg.edit_text(message_text + preview_text)
+                        
+                        # Отправляем файл с полной транскрибацией безопасным способом
+                        await send_file_safely(
+                            message,
+                            transcript_file_path,
+                            caption="Полная транскрибация аудио"
+                        )
+                    else:
+                        # Для коротких транскрибаций просто отправляем весь текст
+                        await processing_msg.edit_text(message_text + transcription)
+                        
+                        # Отправляем файл для удобства
+                        await send_file_safely(
+                            message,
+                            transcript_file_path,
+                            caption="Транскрибация аудио в виде файла"
+                        )
+                    
+                    # Удаляем временные файлы
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        logger.exception(f"Ошибка при удалении временных файлов: {e}")
+                    
+                    # Отмечаем задачу как выполненную
+                    audio_task_queue.task_done()
+                    
+                except TelegramBadRequest as e:
+                    if "file is too big" in str(e).lower():
+                        await processing_msg.edit_text(
+                            "⚠️ Ошибка: Файл слишком большой для обработки в Telegram. "
+                            "Пожалуйста, отправьте аудиофайл меньшего размера (до 20 МБ)."
+                        )
+                    else:
+                        await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
+                    logger.exception(f"Ошибка Telegram при обработке аудио: {e}")
+                    audio_task_queue.task_done()
+                    
+                except Exception as e:
+                    await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
+                    logger.exception(f"Ошибка при обработке аудио: {e}")
+                    audio_task_queue.task_done()
+                    
+            except asyncio.TimeoutError:
+                # Проверка пустой очереди - нормальная ситуация
+                continue
+            except asyncio.CancelledError:
+                # Обработчик был остановлен
+                logger.info("Фоновый обработчик аудиофайлов остановлен")
+                break
+            except Exception as e:
+                logger.exception(f"Неожиданная ошибка в обработчике очереди: {e}")
+                # Продолжаем работу, несмотря на ошибку
+                await asyncio.sleep(1)
+    finally:
+        background_worker_running = False
+        logger.info("Фоновый обработчик аудиофайлов завершен")
+
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_audio(message: types.Message):
     user_id = message.from_user.id
@@ -536,60 +670,27 @@ async def handle_audio(message: types.Message):
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             await processing_msg.edit_text("Ошибка: не удалось скачать аудиофайл или файл пустой.")
             return
-            
-        # Транскрибируем аудио
-        await processing_msg.edit_text(f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...")
-        transcription = await transcribe_audio(file_path)
         
-        # Сохраняем транскрибацию в файл
-        transcript_file_path = save_transcription_to_file(transcription, user_id)
+        # Уведомляем пользователя о постановке в очередь
+        await processing_msg.edit_text(
+            f"Аудиофайл успешно загружен и поставлен в очередь на обработку.\n"
+            f"Размер файла: {file_size/1024/1024:.2f} МБ\n\n"
+            f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова."
+        )
         
-        # Формируем текстовое сообщение
-        message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
+        # Запускаем фоновый обработчик очереди, если он еще не запущен
+        global background_worker_running
+        if not background_worker_running:
+            # Создаем и запускаем задачу, не ожидая ее завершения
+            background_task = asyncio.create_task(background_audio_processor())
+            # Мы не используем await, так как не хотим блокировать выполнение текущего кода
         
-        # Если текст слишком длинный, разбиваем на части
-        if len(transcription) > MAX_MESSAGE_LENGTH - len(message_text):
-            # Отправляем превью транскрибации
-            preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
-            preview_text = transcription[:preview_length] + "...\n\n(полный текст в файле)"
-            await processing_msg.edit_text(message_text + preview_text)
-            
-            # Отправляем файл с полной транскрибацией безопасным способом
-            await send_file_safely(
-                message,
-                transcript_file_path,
-                caption="Полная транскрибация аудио"
-            )
-        else:
-            # Для коротких транскрибаций просто отправляем весь текст
-            await processing_msg.edit_text(message_text + transcription)
-            
-            # Отправляем файл для удобства
-            await send_file_safely(
-                message,
-                transcript_file_path,
-                caption="Транскрибация аудио в виде файла"
-            )
+        # Добавляем задачу в очередь
+        await audio_task_queue.put((message, file_path, processing_msg, user_id, file_name))
+        logger.info(f"Аудиофайл от пользователя {user_id} добавлен в очередь на обработку. Текущий размер очереди: {audio_task_queue.qsize()}")
         
-        # Удаляем временные файлы
-        try:
-            os.remove(file_path)
-            # Оставляем файл с транскрибацией, можно настроить его автоматическое удаление позже
-            # os.remove(transcript_file_path)
-        except Exception as e:
-            logger.exception(f"Ошибка при удалении временных файлов: {e}")
-        
-    except TelegramBadRequest as e:
-        if "file is too big" in str(e).lower():
-            await processing_msg.edit_text(
-                "⚠️ Ошибка: Файл слишком большой для обработки в Telegram. "
-                "Пожалуйста, отправьте аудиофайл меньшего размера (до 20 МБ)."
-            )
-        else:
-            await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
-        logger.exception(f"Ошибка Telegram при обработке аудио: {e}")
     except Exception as e:
-        await processing_msg.edit_text(f"Произошла ошибка при обработке аудио: {str(e)}")
+        await processing_msg.edit_text(f"Произошла ошибка при подготовке аудио к обработке: {str(e)}")
         logger.exception(f"Ошибка при обработке аудио: {e}")
 
 @dp.message()
@@ -644,6 +745,10 @@ async def main():
         logger.info(f'Используемая модель Whisper: {WHISPER_MODEL}')
         logger.info(f'Директория для моделей Whisper: {WHISPER_MODELS_DIR}')
         
+        # Запускаем фоновый обработчик очереди
+        background_task = asyncio.create_task(background_audio_processor())
+        logger.info('Запущен фоновый обработчик очереди аудиофайлов')
+        
         # Устанавливаем команды в меню бота
         await set_commands()
         logger.info('Команды бота установлены')
@@ -651,7 +756,9 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except KeyboardInterrupt:
-        pass
+        logger.info('Остановка фонового обработчика очереди...')
+        # Даем время очереди завершить текущие задачи
+        await asyncio.sleep(1)
     finally:
         await bot.session.close()
         logger.info('Бот остановлен.')
