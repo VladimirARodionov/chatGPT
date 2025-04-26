@@ -90,6 +90,7 @@ BOT_COMMANDS = [
     BotCommand(command="help", description="Показать справку"),
     BotCommand(command="status", description="Проверить лимит сообщений"),
     BotCommand(command="models", description="Показать список моделей Whisper"),
+    BotCommand(command="cancel", description="Отменить текущую обработку аудио"),
 ]
 
 # Создаем очередь задач для обработки аудио в фоновом режиме
@@ -99,6 +100,10 @@ thread_executor = ThreadPoolExecutor(max_workers=3)
 
 # Флаг для отслеживания статуса обработчика очереди
 background_worker_running = False
+
+# Словарь для отслеживания активных задач транскрибации по пользователям
+# Ключ - user_id, значение - (future, message_id, file_path)
+active_transcriptions = {}
 
 async def set_commands():
     """Установка команд бота в меню"""
@@ -861,8 +866,33 @@ async def background_audio_processor():
                     # Распаковываем данные задачи
                     message, file_path, processing_msg, user_id, file_name = task
                     
+                    # Проверяем, не отменена ли задача
+                    if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
+                        logger.info(f"Задача для пользователя {user_id} была отменена. Пропускаем обработку.")
+                        
+                        # Удаляем временные файлы
+                        try:
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                        except Exception as e:
+                            logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
+                        
+                        # Сообщаем пользователю об отмене
+                        await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                        
+                        # Удаляем задачу из активных
+                        del active_transcriptions[user_id]
+                        
+                        # Отмечаем задачу как выполненную
+                        audio_task_queue.task_done()
+                        continue
+                    
                     # Сообщаем о начале транскрибации
-                    await processing_msg.edit_text(f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\nЭто может занять некоторое время в зависимости от длины аудио. Вы можете продолжать использовать бота.")
+                    await processing_msg.edit_text(
+                        f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
+                        f"Это может занять некоторое время в зависимости от длины аудио. Вы можете продолжать использовать бота.\n\n"
+                        f"Чтобы отменить обработку, используйте команду /cancel"
+                    )
                     
                     # Проверяем размер файла для предупреждения о возможном переключении модели
                     try:
@@ -889,9 +919,32 @@ async def background_audio_processor():
                             lambda fp=file_path: asyncio.run(transcribe_audio(fp))
                         )
                         
+                        # Сохраняем информацию о текущей задаче в словаре активных задач
+                        active_transcriptions[user_id] = (future, processing_msg.message_id, file_path)
+                        
                         # Ожидаем результат с периодическим обновлением статуса
                         start_time = datetime.now()
                         while not future.done():
+                            # Проверяем, не отменена ли задача
+                            if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
+                                # Отменяем future (если возможно)
+                                future.cancel()
+                                logger.info(f"Транскрибация для пользователя {user_id} была отменена во время обработки.")
+                                
+                                # Удаляем временные файлы
+                                try:
+                                    if os.path.exists(file_path):
+                                        os.remove(file_path)
+                                except Exception as e:
+                                    logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
+                                
+                                # Сообщаем пользователю об отмене
+                                await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                                
+                                # Отмечаем задачу как выполненную
+                                audio_task_queue.task_done()
+                                break
+                            
                             # Обновляем сообщение о статусе каждые 30 секунд
                             elapsed = (datetime.now() - start_time).total_seconds()
                             if elapsed > 0 and elapsed % 30 < 1:  # примерно каждые 30 секунд
@@ -933,8 +986,16 @@ async def background_audio_processor():
                             # Небольшая пауза, чтобы не нагружать процессор
                             await asyncio.sleep(1)
                         
-                        # Получаем результат
-                        transcription = await future
+                        # После завершения удаляем задачу из словаря активных задач
+                        if user_id in active_transcriptions and active_transcriptions[user_id][0] == future:
+                            del active_transcriptions[user_id]
+                        
+                        # Получаем результат (если задача не была отменена)
+                        if not future.cancelled():
+                            transcription = await future
+                        else:
+                            # Если задача была отменена, пропускаем дальнейшую обработку
+                            continue
                         
                     except Exception as e:
                         logger.exception(f"Ошибка при асинхронной транскрибации: {e}")
@@ -1075,6 +1136,42 @@ async def background_audio_processor():
     finally:
         background_worker_running = False
         logger.info("Фоновый обработчик аудиофайлов завершен")
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message):
+    """Отменяет текущую обработку аудио для пользователя"""
+    user_id = message.from_user.id
+    
+    if user_id not in active_transcriptions:
+        await message.answer("У вас нет активных задач обработки аудио.")
+        return
+    
+    future, message_id, file_path = active_transcriptions[user_id]
+    
+    # Если задача еще не начала выполняться (future - реальный объект Future)
+    if future != "cancelled" and not isinstance(future, str):
+        try:
+            # Помечаем задачу как отмененную
+            active_transcriptions[user_id] = ("cancelled", message_id, file_path)
+            
+            # Пытаемся отправить уведомление об отмене
+            try:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=message_id,
+                    text="⏱ Отмена обработки аудио...\n\nПожалуйста, подождите."
+                )
+            except Exception as e:
+                logger.exception(f"Ошибка при обновлении сообщения об отмене: {e}")
+            
+            await message.answer("✅ Задача обработки аудио отменена.")
+            logger.info(f"Пользователь {user_id} отменил обработку аудио")
+        except Exception as e:
+            await message.answer(f"Произошла ошибка при попытке отменить задачу: {str(e)}")
+            logger.exception(f"Ошибка при отмене задачи: {e}")
+    else:
+        # Если задача уже отменена
+        await message.answer("Задача уже отменена или находится в процессе отмены.")
 
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_audio(message: types.Message):
@@ -1232,7 +1329,8 @@ async def handle_audio(message: types.Message):
             f"{model_info}\n"
             f"Метод загрузки: {'Прямая загрузка через Local Bot API' if is_large_file else 'Стандартный API'}\n\n"
             f"⏱ Примерное время обработки: {estimated_time_str}\n\n"
-            f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова."
+            f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова.\n\n"
+            f"Для отмены обработки используйте команду /cancel"
         )
         
         # Запускаем фоновый обработчик очереди, если он еще не запущен
