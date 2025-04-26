@@ -195,7 +195,59 @@ docker-compose up -d --build
 docker-compose logs -f chatgptapp
 ```
 
-#### Проверка прав доступа вручную
+### Проблемы с запуском Telegram Bot API Server
+
+Если у вас возникают проблемы с запуском контейнера telegram-bot-api и вы видите ошибку "dependency failed to start: container chatgpt-telegram-bot-api-1 is unhealthy", выполните следующие шаги для диагностики и устранения проблемы:
+
+#### Диагностика проблемы
+
+1. Запустите скрипт диагностики для API сервера:
+```bash
+chmod +x fix_api_server.sh
+./fix_api_server.sh
+```
+
+2. Проверьте логи API сервера для получения дополнительной информации:
+```bash
+docker-compose logs telegram-bot-api
+```
+
+#### Распространенные причины и их решения:
+
+1. **Неверные API_ID и API_HASH**
+   - Убедитесь, что в файле `.env` корректно указаны API_ID и API_HASH от Telegram
+   - Эти данные можно получить на сайте [my.telegram.org](https://my.telegram.org)
+
+2. **Порт уже занят другим приложением**
+   - Измените порт в файле `.env`, например:
+   ```
+   API_PORT=8083
+   LOCAL_BOT_API=http://telegram-bot-api:8083
+   ```
+
+3. **Проблемы с директориями для логов и данных**
+   - Создайте необходимые директории вручную:
+   ```bash
+   mkdir -p logs/telegram-bot-api
+   chmod -R 777 logs/telegram-bot-api
+   ```
+
+#### Полная перенастройка API сервера
+
+Если проблемы сохраняются, выполните полную перенастройку:
+
+```bash
+# Остановить и удалить все контейнеры и тома
+docker-compose down -v
+
+# Пересобрать образы без использования кеша
+docker-compose build --no-cache
+
+# Запустить все сервисы
+docker-compose up -d
+```
+
+### Проверка прав доступа вручную
 
 Если проблемы с правами доступа сохраняются, вы можете проверить права доступа внутри контейнера:
 
