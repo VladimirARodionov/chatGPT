@@ -154,12 +154,16 @@ def check_message_limit(user_id: int) -> bool:
         session.commit()
         return True
 
-def save_transcription_to_file(text, user_id):
+def save_transcription_to_file(text, user_id, original_file_name=None, username=None, first_name=None, last_name=None):
     """Сохраняет транскрибированный текст в файл
     
     Args:
         text: Текст транскрибации или словарь с результатами
         user_id: ID пользователя
+        original_file_name: Оригинальное имя файла (если доступно)
+        username: Ник пользователя в Telegram
+        first_name: Имя пользователя
+        last_name: Фамилия пользователя
         
     Returns:
         Путь к сохраненному файлу
@@ -178,9 +182,20 @@ def save_transcription_to_file(text, user_id):
             file.write(f"Транскрибация аудио\n")
             file.write(f"Дата и время: {timestamp}\n")
             file.write(f"Язык: {language}\n")
-            file.write(f"ID пользователя: {user_id}\n\n")
-            file.write("=== ПОЛНЫЙ ТЕКСТ ===\n\n")
-            file.write(transcription_text)
+            file.write(f"ID пользователя: {user_id}\n")
+            # Добавляем информацию о пользователе
+            if username:
+                file.write(f"Username: @{username}\n")
+            if first_name or last_name:
+                user_fullname = f"{first_name or ''} {last_name or ''}".strip()
+                file.write(f"Имя: {user_fullname}\n")
+            if original_file_name and original_file_name != "Голосовое сообщение":
+                file.write(f"Файл: {original_file_name}\n")
+            file.write("\n=== ПОЛНЫЙ ТЕКСТ ===\n\n")
+            
+            # Разделяем текст на абзацы
+            paragraphs = transcription_text.replace('. ', '.\n').replace('! ', '!\n').replace('? ', '?\n')
+            file.write(paragraphs)
             
             # Если есть сегменты, добавляем детальную информацию с таймкодами
             if segments:
@@ -191,9 +206,24 @@ def save_transcription_to_file(text, user_id):
                     segment_text = segment.get('text', '')
                     file.write(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {segment_text}\n")
     else:
-        # Просто сохраняем текст, если это строка или другой формат
+        # Просто сохраняем текст, если это строка или другой формат, также разделяя на абзацы
+        text_str = str(text)
+        paragraphs = text_str.replace('. ', '.\n').replace('! ', '!\n').replace('? ', '?\n')
+        
         with open(filename, "w", encoding="utf-8") as file:
-            file.write(str(text))
+            file.write(f"Транскрибация аудио\n")
+            file.write(f"Дата и время: {timestamp}\n")
+            file.write(f"ID пользователя: {user_id}\n")
+            # Добавляем информацию о пользователе
+            if username:
+                file.write(f"Username: @{username}\n")
+            if first_name or last_name:
+                user_fullname = f"{first_name or ''} {last_name or ''}".strip()
+                file.write(f"Имя: {user_fullname}\n")
+            if original_file_name and original_file_name != "Голосовое сообщение":
+                file.write(f"Файл: {original_file_name}\n")
+            file.write("\n=== ПОЛНЫЙ ТЕКСТ ===\n\n")
+            file.write(paragraphs)
     
     return filename
 
@@ -866,6 +896,11 @@ async def background_audio_processor():
                     # Распаковываем данные задачи
                     message, file_path, processing_msg, user_id, file_name = task
                     
+                    # Получаем данные пользователя для транскрибации
+                    username = message.from_user.username
+                    first_name = message.from_user.first_name
+                    last_name = message.from_user.last_name
+                    
                     # Проверяем, не отменена ли задача
                     if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
                         logger.info(f"Задача для пользователя {user_id} была отменена. Пропускаем обработку.")
@@ -1030,7 +1065,14 @@ async def background_audio_processor():
                         continue
                     
                     # Сохраняем транскрибацию в файл
-                    transcript_file_path = save_transcription_to_file(transcription, user_id)
+                    transcript_file_path = save_transcription_to_file(
+                        transcription, 
+                        user_id, 
+                        file_name, 
+                        username, 
+                        first_name, 
+                        last_name
+                    )
                     
                     # Формируем текстовое сообщение
                     message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
