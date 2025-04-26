@@ -151,7 +151,7 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             
         # Проверяем свободную память перед началом транскрипции
         # Если файл большой, используем более экономичный подход
-        is_large_file = file_size_mb > 15  # Файлы больше 15 МБ считаем большими
+        is_large_file = file_size_mb > 20  # Файлы больше 20 МБ считаем большими
         
         if is_large_file:
             logger.info(f"Обрабатываем большой аудио файл ({file_size_mb:.2f} МБ), применяем оптимизации для памяти")
@@ -167,8 +167,18 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
         if is_large_file:
             # Используем fp16 для экономии памяти
             transcribe_options["fp16"] = True
-            # Уменьшаем batch_size для экономии памяти
-            transcribe_options["batch_size"] = 8
+            
+            # Настройки для больших аудиофайлов
+            transcribe_options["beam_size"] = 2  # Уменьшаем beam_size для экономии памяти
+            transcribe_options["best_of"] = 1    # Ограничиваем количество кандидатов
+            
+            # Если файл очень большой, уменьшаем еще больше
+            if file_size_mb > 100:
+                # При высоких температурах результат менее точный, но требует меньше памяти
+                transcribe_options["temperature"] = 0.2
+                
+            logger.info(f"Применяем оптимизации для большого файла: {transcribe_options}")
+            
             # Можно также переключиться на более легкую модель, если текущая слишком тяжелая
             if model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
                 logger.info(f"Для большого файла временно переключаемся с модели {model_name} на small для экономии памяти")
@@ -182,7 +192,33 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
                 
         # Выполняем транскрипцию
         try:
+            # Доступные параметры для DecodingOptions в whisper:
+            # language, task, temperature, sample_len, best_of, beam_size, patience,
+            # length_penalty, prompt, prefix, suffix, suppress_tokens, without_timestamps,
+            # max_initial_timestamp, fp16, suppress_blank
             logger.info(f"Запускаем транскрибацию с опциями: {transcribe_options}")
+            
+            # Если размер файла очень большой, добавляем дополнительное логирование и обработку участками
+            if file_size_mb > 200:
+                logger.info("Очень большой файл (>200МБ), возможны проблемы с памятью")
+                
+                # Если есть библиотека torch, проверяем доступную память GPU
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                        free_memory_mb = free_memory / (1024 * 1024)
+                        logger.info(f"Доступная память GPU: {free_memory_mb:.2f} МБ")
+                        
+                        # Если свободной памяти мало, выдаем предупреждение
+                        if free_memory_mb < file_size_mb * 2:  # Примерное правило: нужно в 2 раза больше памяти, чем размер файла
+                            logger.warning(f"Недостаточно памяти GPU для обработки файла. Может произойти ошибка Out of Memory.")
+                except ImportError:
+                    logger.warning("Не удалось проверить память GPU, так как torch недоступен")
+                except Exception as e:
+                    logger.warning(f"Ошибка при проверке памяти GPU: {e}")
+                    
+            # Выполняем транскрибацию
             result = model.transcribe(file_path, **transcribe_options)
             
             if not result:
