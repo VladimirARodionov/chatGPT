@@ -18,6 +18,7 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from contextlib import contextmanager
+import aiohttp
 
 from create_bot import db, env_config
 from models import UserMessageCount
@@ -448,6 +449,142 @@ async def download_voice(file, destination):
         logger.exception(f"Ошибка при скачивании файла: {e}")
         return False
 
+async def get_file_path_direct(file_id, bot_token):
+    """
+    Получает прямой путь к файлу на сервере Telegram.
+    
+    Args:
+        file_id: ID файла в Telegram
+        bot_token: Токен бота для авторизации
+        
+    Returns:
+        str: Путь к файлу на сервере Telegram или None в случае ошибки
+    """
+    logger.info(f"Получаем информацию о файле с ID {file_id}")
+    
+    # URL для получения информации о файле
+    url = f"{LOCAL_BOT_API}/bot{bot_token}/getFile"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={'file_id': file_id}) as response:
+                if response.status != 200:
+                    logger.error(f"Ошибка при получении информации о файле. Статус: {response.status}. "
+                                f"Ответ: {await response.text()}")
+                    return None
+                
+                json_response = await response.json()
+                
+                if not json_response.get('ok'):
+                    logger.error(f"API вернул ошибку: {json_response}")
+                    return None
+                
+                file_info = json_response.get('result', {})
+                file_path = file_info.get('file_path')
+                
+                if not file_path:
+                    logger.error(f"Не удалось получить путь к файлу: {json_response}")
+                    return None
+                
+                logger.info(f"Получен путь к файлу: {file_path}")
+                return file_path
+                
+    except Exception as e:
+        logger.exception(f"Ошибка при получении информации о файле: {e}")
+        return None
+
+async def download_large_file_direct(file_id, destination, bot_token):
+    """
+    Загружает файл напрямую с сервера Local Bot API, обходя ограничения 
+    стандартного API Telegram. Поддерживает файлы до 50МБ.
+    
+    Args:
+        file_id: ID файла в Telegram
+        destination: Путь, куда сохранить файл
+        bot_token: Токен бота для авторизации
+        
+    Returns:
+        bool: True если загрузка прошла успешно, False в противном случае
+    """
+    # Получаем информацию о пути к файлу
+    file_path = await get_file_path_direct(file_id, bot_token)
+    if not file_path:
+        logger.error(f"Не удалось получить путь к файлу {file_id}")
+        return False
+    
+    # Формируем URL для загрузки файла напрямую
+    url = f"{LOCAL_BOT_API}/file/bot{bot_token}/{file_path}"
+    
+    logger.info(f"Начинаем загрузку файла напрямую: {url}")
+    MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 МБ
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Проверка заголовков для определения размера файла
+            async with session.head(url) as head_response:
+                if head_response.status != 200:
+                    logger.error(f"Ошибка при проверке файла. Статус: {head_response.status}")
+                    return False
+                
+                # Проверяем размер файла, если есть заголовок Content-Length
+                if 'Content-Length' in head_response.headers:
+                    file_size = int(head_response.headers.get('Content-Length', 0))
+                    if file_size > MAX_FILE_SIZE:
+                        logger.error(f"Файл слишком большой для загрузки: {file_size/1024/1024:.2f} МБ (максимум {MAX_FILE_SIZE/1024/1024} МБ)")
+                        return False
+                    logger.info(f"Размер загружаемого файла: {file_size/1024/1024:.2f} МБ")
+            
+            # Загружаем файл блоками с таймаутом
+            async with session.get(url, timeout=300) as response:
+                if response.status != 200:
+                    logger.error(f"Ошибка при загрузке файла. Статус: {response.status}. "
+                                f"Ответ: {await response.text()}")
+                    return False
+                
+                # Убедимся, что директория существует
+                os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
+                
+                # Загружаем и записываем файл блоками
+                downloaded_size = 0
+                chunk_size = 1024 * 1024  # 1 МБ
+                
+                logger.info(f"Начинаем сохранение файла в {destination}")
+                with open(destination, 'wb') as fd:
+                    async for chunk in response.content.iter_chunked(chunk_size):
+                        fd.write(chunk)
+                        downloaded_size += len(chunk)
+                        if downloaded_size % (5 * chunk_size) == 0:  # Каждые 5 МБ
+                            logger.info(f"Загружено {downloaded_size/1024/1024:.2f} МБ")
+                
+                # Проверяем, что файл не пустой
+                if os.path.getsize(destination) == 0:
+                    logger.error("Загруженный файл пуст")
+                    os.remove(destination)
+                    return False
+                
+                # Проверяем, что размер файла совпадает с ожидаемым
+                if 'Content-Length' in head_response.headers:
+                    expected_size = int(head_response.headers.get('Content-Length'))
+                    actual_size = os.path.getsize(destination)
+                    if expected_size != actual_size:
+                        logger.error(f"Размер загруженного файла ({actual_size}) не соответствует ожидаемому ({expected_size})")
+                        os.remove(destination)
+                        return False
+                
+                logger.info(f"Файл успешно загружен в {destination}, размер: {os.path.getsize(destination)/1024/1024:.2f} МБ")
+                return True
+                
+    except asyncio.TimeoutError:
+        logger.error(f"Тайм-аут при загрузке файла")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
+    except Exception as e:
+        logger.exception(f"Ошибка при загрузке файла: {str(e)}")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
+
 async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
     """Транскрибация аудио с использованием OpenAI API или локальной модели Whisper"""
     try:
@@ -860,146 +997,3 @@ if __name__ == "__main__":
         logger.info('Прерывание')
     except Exception:
         logger.exception('Неизвестная ошибка')
-
-# Добавляем новую функцию для прямой загрузки файлов через Local Bot API
-async def download_large_file_direct(file_id, destination, bot_token):
-    """
-    Загружает файл напрямую с сервера Local Bot API, обходя ограничения 
-    стандартного API Telegram. Поддерживает файлы до 50МБ.
-    
-    Args:
-        file_id: ID файла в Telegram
-        destination: Путь, куда сохранить файл
-        bot_token: Токен бота для авторизации
-        
-    Returns:
-        bool: True если загрузка прошла успешно, False в противном случае
-    """
-    import aiohttp
-    import os
-    
-    # Получаем информацию о пути к файлу
-    file_path = await get_file_path_direct(file_id, bot_token)
-    if not file_path:
-        logger.error(f"Не удалось получить путь к файлу {file_id}")
-        return False
-    
-    # Формируем URL для загрузки файла напрямую
-    url = f"http://localhost:8081/file/bot{bot_token}/{file_path}"
-    
-    logger.info(f"Начинаем загрузку файла напрямую: {url}")
-    MAX_FILE_SIZE = 100 * 1024 * 1024  # 50 МБ
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Проверка заголовков для определения размера файла
-            async with session.head(url) as head_response:
-                if head_response.status != 200:
-                    logger.error(f"Ошибка при проверке файла. Статус: {head_response.status}")
-                    return False
-                
-                # Проверяем размер файла, если есть заголовок Content-Length
-                if 'Content-Length' in head_response.headers:
-                    file_size = int(head_response.headers.get('Content-Length', 0))
-                    if file_size > MAX_FILE_SIZE:
-                        logger.error(f"Файл слишком большой для загрузки: {file_size/1024/1024:.2f} МБ (максимум {MAX_FILE_SIZE/1024/1024} МБ)")
-                        return False
-                    logger.info(f"Размер загружаемого файла: {file_size/1024/1024:.2f} МБ")
-            
-            # Загружаем файл блоками с таймаутом
-            async with session.get(url, timeout=60) as response:
-                if response.status != 200:
-                    logger.error(f"Ошибка при загрузке файла. Статус: {response.status}. "
-                                f"Ответ: {await response.text()}")
-                    return False
-                
-                # Убедимся, что директория существует
-                os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
-                
-                # Загружаем и записываем файл блоками
-                downloaded_size = 0
-                chunk_size = 1024 * 1024  # 1 МБ
-                
-                logger.info(f"Начинаем сохранение файла в {destination}")
-                with open(destination, 'wb') as fd:
-                    async for chunk in response.content.iter_chunked(chunk_size):
-                        fd.write(chunk)
-                        downloaded_size += len(chunk)
-                        if downloaded_size % (5 * chunk_size) == 0:  # Каждые 5 МБ
-                            logger.info(f"Загружено {downloaded_size/1024/1024:.2f} МБ")
-                
-                # Проверяем, что файл не пустой
-                if os.path.getsize(destination) == 0:
-                    logger.error("Загруженный файл пуст")
-                    os.remove(destination)
-                    return False
-                
-                # Проверяем, что размер файла совпадает с ожидаемым
-                if 'Content-Length' in head_response.headers:
-                    expected_size = int(head_response.headers.get('Content-Length'))
-                    actual_size = os.path.getsize(destination)
-                    if expected_size != actual_size:
-                        logger.error(f"Размер загруженного файла ({actual_size}) не соответствует ожидаемому ({expected_size})")
-                        os.remove(destination)
-                        return False
-                
-                logger.info(f"Файл успешно загружен в {destination}, размер: {os.path.getsize(destination)/1024/1024:.2f} МБ")
-                return True
-                
-    except asyncio.TimeoutError:
-        logger.error(f"Тайм-аут при загрузке файла")
-        if os.path.exists(destination):
-            os.remove(destination)
-        return False
-    except Exception as e:
-        logger.exception(f"Ошибка при загрузке файла: {str(e)}")
-        if os.path.exists(destination):
-            os.remove(destination)
-        return False
-
-# Добавляем функцию для получения пути к файлу через Local Bot API
-async def get_file_path_direct(file_id, bot_token):
-    """
-    Получает прямой путь к файлу на сервере Telegram.
-    
-    Args:
-        file_id: ID файла в Telegram
-        bot_token: Токен бота для авторизации
-        
-    Returns:
-        str: Путь к файлу на сервере Telegram или None в случае ошибки
-    """
-    import aiohttp
-    
-    logger.info(f"Получаем информацию о файле с ID {file_id}")
-    
-    # URL для получения информации о файле
-    url = f"{LOCAL_BOT_API}/bot{bot_token}/getFile"
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={'file_id': file_id}) as response:
-                if response.status != 200:
-                    logger.error(f"Ошибка при получении информации о файле. Статус: {response.status}. "
-                                f"Ответ: {await response.text()}")
-                    return None
-                
-                json_response = await response.json()
-                
-                if not json_response.get('ok'):
-                    logger.error(f"API вернул ошибку: {json_response}")
-                    return None
-                
-                file_info = json_response.get('result', {})
-                file_path = file_info.get('file_path')
-                
-                if not file_path:
-                    logger.error(f"Не удалось получить путь к файлу: {json_response}")
-                    return None
-                
-                logger.info(f"Получен путь к файлу: {file_path}")
-                return file_path
-                
-    except Exception as e:
-        logger.exception(f"Ошибка при получении информации о файле: {e}")
-        return None
