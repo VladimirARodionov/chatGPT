@@ -3,6 +3,7 @@ import logging
 import whisper
 from datetime import datetime
 from pathlib import Path
+import time
 
 from create_bot import env_config
 
@@ -95,37 +96,77 @@ def list_downloaded_models():
         logger.error(f"Ошибка при проверке доступных моделей: {e}")
         return []
 
-async def transcribe_with_whisper(file_path, language=None, model_name="base"):
+async def transcribe_with_whisper(file_path, language=None, model_name="small"):
     """
-    Транскрибация аудиофайла с использованием локальной модели Whisper
+    Транскрибирует аудио файл с помощью модели Whisper.
     
     Args:
-        file_path: Путь к аудиофайлу
-        language: Язык аудио (если известен)
-        model_name: Название модели Whisper
+        file_path: Путь к аудио файлу
+        language: Код языка (если None, Whisper попытается определить язык)
+        model_name: Имя модели Whisper для использования
         
     Returns:
-        Текст транскрибации
+        Словарь с результатами транскрипции или None в случае ошибки
     """
     try:
-        # Загрузка модели (или использование уже загруженной)
+        start_time = time.time()
+        logger.info(f"Начата транскрипция файла: {file_path}")
+        
+        # Проверяем существование файла
+        if not os.path.exists(file_path):
+            logger.error(f"Файл не найден: {file_path}")
+            return None
+            
+        # Проверяем размер файла
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logger.info(f"Размер файла: {file_size_mb:.2f} МБ")
+        
+        # Загружаем модель
         model = get_whisper_model(model_name)
+        if model is None:
+            return None
+            
+        # Проверяем свободную память перед началом транскрипции
+        # Если файл большой, используем более экономичный подход
+        is_large_file = file_size_mb > 15  # Файлы больше 15 МБ считаем большими
         
-        # Параметры транскрибации
-        options = {}
-        if language:
-            options["language"] = language
+        if is_large_file:
+            logger.info(f"Обрабатываем большой аудио файл ({file_size_mb:.2f} МБ), применяем оптимизации для памяти")
+            
+        # Выполняем транскрипцию
+        transcribe_options = {
+            "language": language,
+            "verbose": None,
+            "task": "transcribe",
+        }
         
-        # Транскрибация
-        logger.info(f"Начало транскрибации файла: {file_path}")
-        result = model.transcribe(file_path, **options)
-        logger.info(f"Транскрибация завершена")
+        # Для больших файлов добавляем дополнительные опции оптимизации
+        if is_large_file:
+            # Используем fp16 для экономии памяти
+            transcribe_options["fp16"] = True
+            # Уменьшаем batch_size для экономии памяти
+            transcribe_options["batch_size"] = 8
+            # Можно также переключиться на более легкую модель, если текущая слишком тяжелая
+            if model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                logger.info(f"Для большого файла временно переключаемся с модели {model_name} на small для экономии памяти")
+                model = get_whisper_model("small")
+                
+        # Выполняем транскрипцию
+        result = model.transcribe(file_path, **transcribe_options)
         
-        return result["text"]
-    
+        # Засекаем время выполнения
+        elapsed_time = time.time() - start_time
+        audio_duration = result.get("duration", 0)
+        ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
+        
+        logger.info(f"Транскрипция завершена за {elapsed_time:.2f} сек. " 
+                    f"Длительность аудио: {audio_duration:.2f} сек. "
+                    f"Соотношение: {ratio:.2f}x")
+                    
+        return result
     except Exception as e:
-        logger.exception(f"Ошибка при транскрибации с Whisper: {e}")
-        raise
+        logger.exception(f"Ошибка при транскрипции файла {file_path}: {e}")
+        return None
 
 async def convert_audio_format(input_file, output_format="wav"):
     """

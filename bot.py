@@ -62,9 +62,11 @@ MAX_CAPTION_LENGTH = 1024  # максимальная длина подписи 
 # Устанавливаем лимиты в зависимости от использования локального Bot API
 if LOCAL_BOT_API:
     MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2000 МБ для локального Bot API
+    STANDARD_API_LIMIT = 20 * 1024 * 1024  # Стандартное ограничение Telegram Bot API (для справки)
     logger.info(f'Используется увеличенный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
 else:
     MAX_FILE_SIZE = 20 * 1024 * 1024    # 20 МБ для обычного Bot API
+    STANDARD_API_LIMIT = MAX_FILE_SIZE
 
 # Директории для файлов
 TEMP_AUDIO_DIR = "temp_audio"
@@ -626,66 +628,113 @@ async def handle_audio(message: types.Message):
         if message.audio and message.audio.file_name:
             file_name = message.audio.file_name
         
-        # Получаем информацию о файле
-        try:
-            file = await bot.get_file(file_id)
-            file_size = file.file_size
-        except TelegramBadRequest as e:
-            if "file is too big" in str(e).lower():
-                # Если ошибка возникает уже на этапе получения информации о файле
-                await processing_msg.edit_text(
-                    f"⚠️ Файл слишком большой для API Telegram.\n\n"
-                    f"Ограничение Telegram Bot API: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
-                    f"Даже если вы используете Local Bot API Server, существуют ограничения "
-                    f"на размер файлов, которые можно получить через API.\n\n"
-                    f"Пожалуйста, попробуйте:\n"
-                    f"1. Использовать аудиофайл меньшего размера\n"
-                    f"2. Разделить длинную запись на несколько частей\n"
-                    f"3. Сжать аудиофайл перед отправкой"
-                )
-                logger.error(f"Ошибка при получении информации о файле - слишком большой размер: {e}")
-                return
-            else:
-                raise  # Передаем другие ошибки дальше
-        
-        # Проверяем размер файла
-        if file_size > MAX_FILE_SIZE:
-            await processing_msg.edit_text(
-                f"⚠️ Файл слишком большой ({file_size/1024/1024:.1f} МБ).\n\n"
-                f"Максимальный размер файла для обработки: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
-                f"{'Вы используете Local Bot API Server, но ' if LOCAL_BOT_API else ''}"
-                f"Пожалуйста, отправьте аудиофайл меньшего размера или разделите его на части."
-            )
-            return
-        
         # Путь для сохранения аудио
         file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
         
-        # Скачиваем файл
-        await processing_msg.edit_text("Скачиваю аудиофайл...")
+        # Получаем информацию о файле и скачиваем его
+        is_large_file = False
+        file_size = 0
+        
         try:
-            await bot.download(file, destination=file_path)
+            # Сначала пробуем получить информацию о файле
+            await processing_msg.edit_text("Получаю информацию о файле...")
+            
+            try:
+                file = await bot.get_file(file_id)
+                file_size = file.file_size
+                
+                logger.info(f"Информация о файле получена: file_id={file_id}, size={file_size/1024/1024:.2f} МБ")
+                
+                # Проверяем размер файла
+                if file_size > MAX_FILE_SIZE:
+                    await processing_msg.edit_text(
+                        f"⚠️ Файл слишком большой для обработки. Максимальный размер: {MAX_FILE_SIZE/1024/1024:.1f} МБ.\n\n"
+                        f"Размер вашего файла: {file_size/1024/1024:.1f} МБ.\n\n"
+                        f"Рекомендации:\n"
+                        f"• Сократите длительность аудио\n"
+                        f"• Разделите длинное аудио на несколько частей\n"
+                        f"• Используйте формат с большим сжатием (MP3 с низким битрейтом)"
+                    )
+                    return
+                
+                # Проверяем, необходимо ли использовать прямую загрузку
+                if file_size <= STANDARD_API_LIMIT:
+                    await processing_msg.edit_text("Скачиваю аудиофайл стандартным методом...")
+                    download_success = await download_voice(file, file_path)
+                    
+                    if not download_success:
+                        await processing_msg.edit_text(
+                            "⚠️ Не удалось скачать аудиофайл стандартным методом. "
+                            "Попробуйте еще раз или отправьте файл меньшего размера."
+                        )
+                        return
+                else:
+                    is_large_file = True
+            except TelegramBadRequest as e:
+                if "file is too big" in str(e).lower():
+                    # Файл слишком большой для стандартного API, пробуем через Local Bot API напрямую
+                    is_large_file = True
+                else:
+                    raise
+            
+            # Если файл большой и есть Local Bot API, используем прямую загрузку
+            if is_large_file:
+                if not LOCAL_BOT_API:
+                    await processing_msg.edit_text(
+                        f"⚠️ Файл слишком большой для стандартного Telegram Bot API (> 20 МБ).\n\n"
+                        f"Для обработки файлов такого размера необходимо настроить Local Bot API Server. "
+                        f"Обратитесь к администратору бота или следуйте инструкциям в документации."
+                    )
+                    return
+                
+                await processing_msg.edit_text("Файл слишком большой для стандартного API. Использую прямую загрузку через Local Bot API...")
+                
+                # Получаем токен бота
+                bot_token = env_config.get('TELEGRAM_TOKEN')
+                
+                # Получаем путь к файлу через прямой запрос
+                await processing_msg.edit_text("Получаю информацию о большом файле через Local Bot API...")
+                file_path_on_server = await get_file_path_direct(file_id, bot_token)
+                
+                if not file_path_on_server:
+                    await processing_msg.edit_text(
+                        "⚠️ Не удалось получить информацию о файле через Local Bot API. "
+                        "Возможно, файл всё ещё слишком большой или возникла другая ошибка."
+                    )
+                    return
+                
+                # Загружаем файл напрямую через Local Bot API
+                await processing_msg.edit_text(f"Загружаю большой файл напрямую через Local Bot API...\nЭтот процесс может занять некоторое время для файлов большого размера.")
+                
+                if not await download_large_file_direct(file_id, file_path, bot_token):
+                    await processing_msg.edit_text(
+                        "⚠️ Не удалось загрузить файл через Local Bot API. "
+                        "Возможно, файл слишком большой или возникла ошибка сервера."
+                    )
+                    return
+                
+                # Получаем размер скачанного файла
+                file_size = os.path.getsize(file_path)
         except TelegramBadRequest as e:
             if "file is too big" in str(e).lower():
                 await processing_msg.edit_text(
-                    f"⚠️ Ошибка при скачивании: файл слишком большой для API Telegram.\n\n"
-                    f"Размер файла: {file_size/1024/1024:.1f} МБ\n"
-                    f"Ограничение {'Local Bot API' if LOCAL_BOT_API else 'Telegram Bot API'}: {MAX_FILE_SIZE/1024/1024:.1f} МБ\n\n"
-                    f"Даже при использовании Local Bot API, существуют ограничения на работу с большими файлами.\n\n"
+                    f"⚠️ Ошибка при загрузке: файл слишком большой для API Telegram.\n\n"
+                    f"Даже при использовании Local Bot API существуют ограничения. "
+                    f"Максимальный поддерживаемый размер файла: 2000 МБ.\n\n"
                     f"Рекомендации:\n"
                     f"• Используйте файл меньшего размера\n"
                     f"• Сократите длительность аудио\n"
                     f"• Разделите длинное аудио на несколько частей\n"
-                    f"• Попробуйте конвертировать файл в формат с меньшим битрейтом"
+                    f"• Используйте формат с большим сжатием (MP3 с низким битрейтом)"
                 )
-                logger.error(f"Ошибка при скачивании файла - слишком большой размер: {e}")
+                return
             else:
-                await processing_msg.edit_text(f"Ошибка при скачивании аудиофайла: {str(e)}")
-                logger.exception(f"Ошибка Telegram при скачивании: {e}")
-            return
+                await processing_msg.edit_text(f"Ошибка при загрузке файла: {str(e)}")
+                logger.exception(f"Ошибка Telegram при загрузке: {e}")
+                return
         except Exception as e:
-            await processing_msg.edit_text(f"Ошибка при скачивании аудиофайла: {str(e)}")
-            logger.exception(f"Ошибка при скачивании файла: {e}")
+            await processing_msg.edit_text(f"Произошла ошибка при загрузке файла: {str(e)}")
+            logger.exception(f"Ошибка при загрузке файла: {e}")
             return
         
         # Проверяем, что файл успешно скачан
@@ -694,9 +743,11 @@ async def handle_audio(message: types.Message):
             return
         
         # Уведомляем пользователя о постановке в очередь
+        file_size_mb = file_size / (1024 * 1024)
         await processing_msg.edit_text(
             f"Аудиофайл успешно загружен и поставлен в очередь на обработку.\n"
-            f"Размер файла: {file_size/1024/1024:.2f} МБ\n\n"
+            f"Размер файла: {file_size_mb:.2f} МБ\n"
+            f"Метод загрузки: {'Прямая загрузка через Local Bot API' if is_large_file else 'Стандартный API'}\n\n"
             f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова."
         )
         
@@ -715,11 +766,12 @@ async def handle_audio(message: types.Message):
         if "file is too big" in str(e).lower():
             await processing_msg.edit_text(
                 f"⚠️ Ошибка: Файл слишком большой для обработки в Telegram.\n\n"
+                f"Текущее ограничение: 20 МБ (даже при использовании Local Bot API)\n\n"
                 f"Рекомендации:\n"
-                f"• Используйте файл меньшего размера (до {MAX_FILE_SIZE/1024/1024:.1f} МБ)\n"
+                f"• Используйте файл меньшего размера (до 20 МБ)\n"
                 f"• Сократите длительность аудио\n"
                 f"• Разделите длинное аудио на несколько частей\n"
-                f"• {'Перезапустите бота, если вы используете Local Bot API' if LOCAL_BOT_API else 'Настройте Local Bot API для работы с файлами до 2 ГБ'}"
+                f"• Конвертируйте файл в формат с бóльшим сжатием (например, MP3 96 kbps)"
             )
             logger.error(f"Ошибка 'file is too big' при обработке аудио: {e}")
         else:
@@ -808,3 +860,146 @@ if __name__ == "__main__":
         logger.info('Прерывание')
     except Exception:
         logger.exception('Неизвестная ошибка')
+
+# Добавляем новую функцию для прямой загрузки файлов через Local Bot API
+async def download_large_file_direct(file_id, destination, bot_token):
+    """
+    Загружает файл напрямую с сервера Local Bot API, обходя ограничения 
+    стандартного API Telegram. Поддерживает файлы до 50МБ.
+    
+    Args:
+        file_id: ID файла в Telegram
+        destination: Путь, куда сохранить файл
+        bot_token: Токен бота для авторизации
+        
+    Returns:
+        bool: True если загрузка прошла успешно, False в противном случае
+    """
+    import aiohttp
+    import os
+    
+    # Получаем информацию о пути к файлу
+    file_path = await get_file_path_direct(file_id, bot_token)
+    if not file_path:
+        logger.error(f"Не удалось получить путь к файлу {file_id}")
+        return False
+    
+    # Формируем URL для загрузки файла напрямую
+    url = f"http://localhost:8081/file/bot{bot_token}/{file_path}"
+    
+    logger.info(f"Начинаем загрузку файла напрямую: {url}")
+    MAX_FILE_SIZE = 100 * 1024 * 1024  # 50 МБ
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Проверка заголовков для определения размера файла
+            async with session.head(url) as head_response:
+                if head_response.status != 200:
+                    logger.error(f"Ошибка при проверке файла. Статус: {head_response.status}")
+                    return False
+                
+                # Проверяем размер файла, если есть заголовок Content-Length
+                if 'Content-Length' in head_response.headers:
+                    file_size = int(head_response.headers.get('Content-Length', 0))
+                    if file_size > MAX_FILE_SIZE:
+                        logger.error(f"Файл слишком большой для загрузки: {file_size/1024/1024:.2f} МБ (максимум {MAX_FILE_SIZE/1024/1024} МБ)")
+                        return False
+                    logger.info(f"Размер загружаемого файла: {file_size/1024/1024:.2f} МБ")
+            
+            # Загружаем файл блоками с таймаутом
+            async with session.get(url, timeout=60) as response:
+                if response.status != 200:
+                    logger.error(f"Ошибка при загрузке файла. Статус: {response.status}. "
+                                f"Ответ: {await response.text()}")
+                    return False
+                
+                # Убедимся, что директория существует
+                os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
+                
+                # Загружаем и записываем файл блоками
+                downloaded_size = 0
+                chunk_size = 1024 * 1024  # 1 МБ
+                
+                logger.info(f"Начинаем сохранение файла в {destination}")
+                with open(destination, 'wb') as fd:
+                    async for chunk in response.content.iter_chunked(chunk_size):
+                        fd.write(chunk)
+                        downloaded_size += len(chunk)
+                        if downloaded_size % (5 * chunk_size) == 0:  # Каждые 5 МБ
+                            logger.info(f"Загружено {downloaded_size/1024/1024:.2f} МБ")
+                
+                # Проверяем, что файл не пустой
+                if os.path.getsize(destination) == 0:
+                    logger.error("Загруженный файл пуст")
+                    os.remove(destination)
+                    return False
+                
+                # Проверяем, что размер файла совпадает с ожидаемым
+                if 'Content-Length' in head_response.headers:
+                    expected_size = int(head_response.headers.get('Content-Length'))
+                    actual_size = os.path.getsize(destination)
+                    if expected_size != actual_size:
+                        logger.error(f"Размер загруженного файла ({actual_size}) не соответствует ожидаемому ({expected_size})")
+                        os.remove(destination)
+                        return False
+                
+                logger.info(f"Файл успешно загружен в {destination}, размер: {os.path.getsize(destination)/1024/1024:.2f} МБ")
+                return True
+                
+    except asyncio.TimeoutError:
+        logger.error(f"Тайм-аут при загрузке файла")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
+    except Exception as e:
+        logger.exception(f"Ошибка при загрузке файла: {str(e)}")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
+
+# Добавляем функцию для получения пути к файлу через Local Bot API
+async def get_file_path_direct(file_id, bot_token):
+    """
+    Получает прямой путь к файлу на сервере Telegram.
+    
+    Args:
+        file_id: ID файла в Telegram
+        bot_token: Токен бота для авторизации
+        
+    Returns:
+        str: Путь к файлу на сервере Telegram или None в случае ошибки
+    """
+    import aiohttp
+    
+    logger.info(f"Получаем информацию о файле с ID {file_id}")
+    
+    # URL для получения информации о файле
+    url = f"{LOCAL_BOT_API}/bot{bot_token}/getFile"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={'file_id': file_id}) as response:
+                if response.status != 200:
+                    logger.error(f"Ошибка при получении информации о файле. Статус: {response.status}. "
+                                f"Ответ: {await response.text()}")
+                    return None
+                
+                json_response = await response.json()
+                
+                if not json_response.get('ok'):
+                    logger.error(f"API вернул ошибку: {json_response}")
+                    return None
+                
+                file_info = json_response.get('result', {})
+                file_path = file_info.get('file_path')
+                
+                if not file_path:
+                    logger.error(f"Не удалось получить путь к файлу: {json_response}")
+                    return None
+                
+                logger.info(f"Получен путь к файлу: {file_path}")
+                return file_path
+                
+    except Exception as e:
+        logger.exception(f"Ошибка при получении информации о файле: {e}")
+        return None
