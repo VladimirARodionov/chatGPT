@@ -927,23 +927,29 @@ async def background_audio_processor():
                         while not future.done():
                             # Проверяем, не отменена ли задача
                             if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
-                                # Отменяем future (если возможно)
-                                future.cancel()
-                                logger.info(f"Транскрибация для пользователя {user_id} была отменена во время обработки.")
-                                
-                                # Удаляем временные файлы
-                                try:
-                                    if os.path.exists(file_path):
-                                        os.remove(file_path)
-                                except Exception as e:
-                                    logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
-                                
-                                # Сообщаем пользователю об отмене
-                                await processing_msg.edit_text("❌ Обработка аудио была отменена.")
-                                
-                                # Отмечаем задачу как выполненную
-                                audio_task_queue.task_done()
-                                break
+                                # Проверяем, что отмена относится к текущей задаче
+                                current_msg_id = active_transcriptions[user_id][1]
+                                if current_msg_id == processing_msg.message_id:
+                                    # Отменяем future (если возможно)
+                                    future.cancel()
+                                    logger.info(f"Транскрибация для пользователя {user_id} была отменена во время обработки.")
+                                    
+                                    # Удаляем временные файлы
+                                    try:
+                                        if os.path.exists(file_path):
+                                            os.remove(file_path)
+                                    except Exception as e:
+                                        logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
+                                    
+                                    # Сообщаем пользователю об отмене
+                                    await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                                    
+                                    # Удаляем задачу из активных
+                                    del active_transcriptions[user_id]
+                                    
+                                    # Отмечаем задачу как выполненную
+                                    audio_task_queue.task_done()
+                                    break
                             
                             # Обновляем сообщение о статусе каждые 30 секунд
                             elapsed = (datetime.now() - start_time).total_seconds()
@@ -1180,6 +1186,12 @@ async def handle_audio(message: types.Message):
     if not USE_LOCAL_WHISPER and not check_message_limit(user_id):
         await message.answer("Вы достигли дневного лимита в 50 сообщений. Попробуйте завтра!")
         return
+    
+    # Проверка, нет ли уже активной задачи с отметкой "отменено"
+    if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
+        # Если найдена отмененная задача, удаляем её из словаря, так как она больше не актуальна
+        del active_transcriptions[user_id]
+        logger.info(f"Удалена устаревшая отмененная задача для пользователя {user_id}")
     
     # Отправляем сообщение о начале обработки
     processing_msg = await message.answer("Загружаю и обрабатываю аудио...")
