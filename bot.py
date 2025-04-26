@@ -62,22 +62,23 @@ WHISPER_MODEL = env_config.get('WHISPER_MODEL', 'base')
 USE_LOCAL_WHISPER = env_config.get('USE_LOCAL_WHISPER', 'True').lower() in ('true', '1', 'yes')
 WHISPER_MODELS_DIR = env_config.get('WHISPER_MODELS_DIR', 'whisper_models')
 
+# Директории для файлов
+TEMP_AUDIO_DIR = "temp_audio"
+TRANSCRIPTION_DIR = "transcriptions"
+
 # Ограничения для Telegram
 MAX_MESSAGE_LENGTH = 4096  # максимальная длина сообщения в Telegram
 MAX_CAPTION_LENGTH = 1024  # максимальная длина подписи к файлу
 
 # Устанавливаем лимиты в зависимости от использования локального Bot API
+STANDARD_API_LIMIT = 20 * 1024 * 1024  # 20 МБ для обычного Bot API
+MAX_FILE_SIZE = STANDARD_API_LIMIT
+
 if LOCAL_BOT_API:
     MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2000 МБ для локального Bot API
-    STANDARD_API_LIMIT = 20 * 1024 * 1024  # Стандартное ограничение Telegram Bot API (для справки)
     logger.info(f'Используется увеличенный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
 else:
-    MAX_FILE_SIZE = 20 * 1024 * 1024    # 20 МБ для обычного Bot API
-    STANDARD_API_LIMIT = MAX_FILE_SIZE
-
-# Директории для файлов
-TEMP_AUDIO_DIR = "temp_audio"
-TRANSCRIPTION_DIR = "transcriptions"
+    logger.info(f'Используется стандартный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
 
 # Создаем директории, если они не существуют
 os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
@@ -531,8 +532,21 @@ async def download_large_file_direct(file_id, destination, bot_token):
         logger.error(f"Не удалось получить путь к файлу {file_id}")
         return False
     
+    # Проверяем доступность файла через API
+    file_info = await get_file_path_direct(file_id, bot_token, return_full_info=True)
+    if file_info and 'file_size' in file_info:
+        file_size = file_info['file_size']
+        logger.info(f"Размер загружаемого файла (из API): {file_size/1024/1024:.2f} МБ")
+        
+        # Проверяем размер файла
+        if file_size > MAX_FILE_SIZE:
+            logger.error(f"Файл слишком большой для загрузки: {file_size/1024/1024:.2f} МБ (максимум {MAX_FILE_SIZE/1024/1024:.1f} МБ)")
+            return False
+    else:
+        logger.warning("Не удалось получить размер файла из API, продолжаем без проверки размера")
+    
     # Пробуем сначала прямой доступ к файлу, если это возможно
-    if os.path.isfile(file_path):
+    if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
         try:
             logger.info(f"Файл доступен локально, копируем напрямую: {file_path} -> {destination}")
             
@@ -549,11 +563,46 @@ async def download_large_file_direct(file_id, destination, bot_token):
         except (IOError, OSError) as e:
             logger.error(f"Ошибка при локальном копировании файла: {e}")
             logger.info("Продолжаем с методом загрузки через HTTP")
+    elif os.path.isfile(file_path) and not os.access(file_path, os.R_OK):
+        # Файл существует, но нет прав доступа - попробуем через sudo
+        try:
+            logger.info(f"Файл существует, но требуются права root для копирования: {file_path}")
+            
+            # Создаем директорию назначения, если она не существует
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            
+            # Пробуем скопировать файл используя sudo (если разрешено)
+            import subprocess
+            
+            # Проверяем, настроен ли sudo без пароля для данного пользователя и этого файла
+            logger.info("Пробуем копировать через sudo")
+            
+            # Формируем команду для копирования
+            cmd = f"sudo cp '{file_path}' '{destination}'"
+            
+            # Выполняем команду
+            process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if process.returncode == 0:
+                # Проверяем, что файл скопирован и имеет правильный размер
+                if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                    # Меняем права доступа для скопированного файла, чтобы бот мог его читать
+                    os.chmod(destination, 0o644)
+                    file_size = os.path.getsize(destination)
+                    logger.info(f"Файл успешно скопирован через sudo, размер: {file_size/1024/1024:.2f} МБ")
+                    return True
+                else:
+                    logger.error("Файл скопирован через sudo, но он пустой или не существует")
+            else:
+                logger.error(f"Ошибка при копировании через sudo: {process.stderr}")
+                logger.info("Возможно, требуется настроить sudo без пароля для данной команды")
+        except Exception as e:
+            logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
     elif file_path.startswith('/var/lib/telegram-bot-api'):
         # Пытаемся использовать настраиваемый путь к файлам Local Bot API
         bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', LOCAL_BOT_API_FILES_PATH)
         
-        if os.path.isfile(bot_specific_path):
+        if os.path.isfile(bot_specific_path) and os.access(bot_specific_path, os.R_OK):
             try:
                 logger.info(f"Файл найден по настраиваемому пути, копируем: {bot_specific_path} -> {destination}")
                 
@@ -570,6 +619,37 @@ async def download_large_file_direct(file_id, destination, bot_token):
             except (IOError, OSError) as e:
                 logger.error(f"Ошибка при локальном копировании файла через настраиваемый путь: {e}")
                 logger.info("Продолжаем с проверкой других путей")
+        elif os.path.isfile(bot_specific_path) and not os.access(bot_specific_path, os.R_OK):
+            # Файл существует по альтернативному пути, но нет прав доступа
+            try:
+                logger.info(f"Файл существует по настраиваемому пути, но требуются права root для копирования: {bot_specific_path}")
+                
+                # Создаем директорию назначения, если она не существует
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                
+                # Пробуем скопировать файл используя sudo
+                import subprocess
+                
+                # Формируем команду для копирования
+                cmd = f"sudo cp '{bot_specific_path}' '{destination}'"
+                
+                # Выполняем команду
+                process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                
+                if process.returncode == 0:
+                    # Проверяем, что файл скопирован и имеет правильный размер
+                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                        # Меняем права доступа для скопированного файла, чтобы бот мог его читать
+                        os.chmod(destination, 0o644)
+                        file_size = os.path.getsize(destination)
+                        logger.info(f"Файл успешно скопирован через sudo из настраиваемого пути, размер: {file_size/1024/1024:.2f} МБ")
+                        return True
+                    else:
+                        logger.error("Файл скопирован через sudo, но он пустой или не существует")
+                else:
+                    logger.error(f"Ошибка при копировании через sudo: {process.stderr}")
+            except Exception as e:
+                logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
         
         # Проверяем еще несколько альтернативных вариантов пути
         alt_paths = [
@@ -620,7 +700,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
     url = f"{LOCAL_BOT_API}/file/bot{bot_token}/{file_path}"
     
     logger.info(f"Начинаем загрузку файла напрямую через HTTP: {url}")
-    MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 МБ
+    local_max_file_size = 100 * 1024 * 1024  # 100 МБ максимум для загрузки через HTTP
     
     try:
         # Получаем размер файла и верхнее ограничение из API getFile
@@ -630,8 +710,8 @@ async def download_large_file_direct(file_id, destination, bot_token):
             logger.info(f"Размер загружаемого файла (из API): {file_size/1024/1024:.2f} МБ")
             
             # Проверяем размер файла
-            if file_size > MAX_FILE_SIZE:
-                logger.error(f"Файл слишком большой для загрузки: {file_size/1024/1024:.2f} МБ (максимум {MAX_FILE_SIZE/1024/1024} МБ)")
+            if file_size > local_max_file_size:
+                logger.error(f"Файл слишком большой для загрузки через HTTP: {file_size/1024/1024:.2f} МБ (максимум {local_max_file_size/1024/1024} МБ)")
                 return False
         else:
             logger.warning("Не удалось получить размер файла из API, продолжаем без проверки размера")
