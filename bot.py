@@ -21,7 +21,7 @@ import aiohttp
 
 from create_bot import db, env_config
 from models import UserMessageCount
-from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models, should_use_smaller_model
+from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models, should_use_smaller_model, predict_processing_time
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -903,11 +903,26 @@ async def background_audio_processor():
                                 should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
                                 
                                 if should_switch:
-                                    current_model = f"{smaller_model} (автоматически выбрана для большого файла)"
+                                    current_model = smaller_model
+                                
+                                # Получаем предполагаемое оставшееся время
+                                estimated_total = predict_processing_time(file_path, current_model)
+                                elapsed_td = timedelta(seconds=int(elapsed))
+                                remaining = estimated_total - elapsed_td if estimated_total > elapsed_td else timedelta(seconds=10)
+                                
+                                # Расчет примерного процента завершения
+                                if estimated_total.total_seconds() > 0:
+                                    percent_complete = min(95, int((elapsed / estimated_total.total_seconds()) * 100))
+                                    progress_bar = "█" * (percent_complete // 5) + "░" * ((100 - percent_complete) // 5)
+                                else:
+                                    percent_complete = 0
+                                    progress_bar = "░" * 20
                                 
                                 status_message = (
                                     f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                     f"⏱ Прошло времени: {time_str}\n"
+                                    f"⌛ Осталось примерно: {str(remaining)}\n"
+                                    f"📊 Прогресс: {progress_bar} {percent_complete}%\n"
                                     f"📁 Файл: {file_name}\n"
                                     f"🎯 Модель: {current_model}\n\n"
                                     f"Вы можете продолжать использовать бота для других задач."
@@ -1195,12 +1210,28 @@ async def handle_audio(message: types.Message):
             await processing_msg.edit_text("Ошибка: не удалось скачать аудиофайл или файл пустой.")
             return
         
+        # Предсказываем время обработки
+        estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
+        estimated_time_str = str(timedelta(seconds=estimated_time))
+        
         # Уведомляем пользователя о постановке в очередь
         file_size_mb = file_size / (1024 * 1024)
+        
+        # Проверяем, нужно ли использовать модель меньшего размера
+        should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
+        model_info = f"Модель: {WHISPER_MODEL}"
+        if should_switch:
+            model_info = f"Модель: {smaller_model} (автоматически выбрана для большого файла вместо {WHISPER_MODEL})"
+            # Обновляем время с учетом фактически используемой модели
+            estimated_time = predict_processing_time(file_path, smaller_model)
+            estimated_time_str = str(timedelta(seconds=estimated_time))
+        
         await processing_msg.edit_text(
             f"Аудиофайл успешно загружен и поставлен в очередь на обработку.\n"
             f"Размер файла: {file_size_mb:.2f} МБ\n"
+            f"{model_info}\n"
             f"Метод загрузки: {'Прямая загрузка через Local Bot API' if is_large_file else 'Стандартный API'}\n\n"
+            f"⏱ Примерное время обработки: {estimated_time_str}\n\n"
             f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова."
         )
         

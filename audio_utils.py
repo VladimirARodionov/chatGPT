@@ -1,9 +1,11 @@
 import os
 import logging
 import whisper
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import time
+import subprocess
+import json
 
 from create_bot import env_config
 
@@ -399,3 +401,87 @@ def should_use_smaller_model(file_size_mb, model_name):
     
     # Модель менять не нужно
     return False, model_name 
+
+def predict_processing_time(file_path, model_name):
+    """
+    Предсказывает примерное время обработки аудиофайла с использованием Whisper.
+    
+    Аргументы:
+        file_path (str): Путь к аудиофайлу
+        model_name (str): Название модели Whisper (tiny, base, small, medium, large-v1, large-v2, large-v3)
+        
+    Возвращает:
+        datetime.timedelta: Предполагаемое время обработки
+    """
+    # Получаем размер файла в МБ
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    
+    # Проверяем наличие ffprobe для получения длительности
+    audio_duration_seconds = 0
+    try:
+        # Выполняем команду ffprobe для получения информации о длительности
+        result = subprocess.run(
+            [
+                "ffprobe", 
+                "-v", "error", 
+                "-show_entries", "format=duration", 
+                "-of", "json", 
+                file_path
+            ],
+            capture_output=True,
+            text=True
+        )
+        
+        # Парсим результат
+        if result.returncode == 0:
+            output = json.loads(result.stdout)
+            audio_duration_seconds = float(output["format"]["duration"])
+        else:
+            # Если ffprobe не удалось получить длительность, оцениваем по размеру файла
+            # Приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
+            audio_duration_seconds = file_size_mb * 60
+    except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError):
+        # Если произошла ошибка, оцениваем по размеру файла
+        audio_duration_seconds = file_size_mb * 60
+    
+    # Коэффициенты скорости обработки для разных моделей (относительно реального времени)
+    # Это приблизительные значения, которые могут отличаться в зависимости от оборудования
+    speed_factors = {
+        "tiny": 5.0,     # примерно в 5 раз быстрее реального времени
+        "base": 3.0,     # примерно в 3 раза быстрее реального времени
+        "small": 1.5,    # примерно в 1.5 раза быстрее реального времени
+        "medium": 0.8,   # примерно в 0.8 раза быстрее реального времени (медленнее)
+        "large": 0.4,    # примерно в 0.4 раза быстрее реального времени (ещё медленнее)
+        "large-v1": 0.4, # аналогично large
+        "large-v2": 0.35,# немного медленнее чем large-v1
+        "large-v3": 0.3  # самая медленная
+    }
+    
+    # Получаем коэффициент для выбранной модели, или используем значение по умолчанию
+    speed_factor = speed_factors.get(model_name.lower(), 1.0)
+    
+    # Фиксированное время на инициализацию модели (в секундах)
+    init_time = {
+        "tiny": 2,
+        "base": 3,
+        "small": 5,
+        "medium": 10,
+        "large": 15,
+        "large-v1": 15,
+        "large-v2": 20,
+        "large-v3": 25
+    }.get(model_name.lower(), 10)
+    
+    # Фактор для файлов большого размера - обработка замедляется
+    size_penalty = 1.0
+    if file_size_mb > 15:
+        # Для файлов > 15 МБ добавляем штраф времени
+        size_penalty = 1.0 + (file_size_mb - 15) * 0.03  # +3% за каждый МБ свыше 15
+    
+    # Рассчитываем время обработки
+    processing_time_seconds = (audio_duration_seconds / speed_factor) * size_penalty + init_time
+    
+    # Добавляем 10% запаса для учета других факторов
+    processing_time_seconds *= 1.1
+    
+    return timedelta(seconds=int(processing_time_seconds)) 
