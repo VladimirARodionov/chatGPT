@@ -41,10 +41,52 @@ def get_whisper_model(model_name="base"):
             model_dir = Path(MODELS_DIR) / model_name
             logger.info(f"Директория для моделей Whisper: {os.environ['XDG_CACHE_HOME']}")
             
-            # Загружаем модель (скачивается автоматически, если её нет)
-            _whisper_model = whisper.load_model(model_name)
-            _current_model_name = model_name
-            logger.info(f"Модель Whisper {model_name} успешно загружена")
+            # Сначала проверяем наличие предварительно загруженной модели в папке whisper
+            model_found = False
+            whisper_dir = Path(MODELS_DIR) / "whisper"
+            
+            if whisper_dir.exists() and whisper_dir.is_dir():
+                # Возможные варианты имен файлов для данной модели
+                possible_filenames = [
+                    f"{model_name}.pt",
+                    f"{model_name}-v2.pt",
+                    f"{model_name}-v3.pt"
+                ]
+                
+                # Особая обработка для turbo модели
+                if model_name == "turbo":
+                    possible_filenames.extend([
+                        "large-v3-turbo.pt", 
+                        "large-v2-turbo.pt", 
+                        "large-turbo.pt"
+                    ])
+                
+                # Ищем файл в подпапке whisper
+                model_path = None
+                for filename in possible_filenames:
+                    file_path = whisper_dir / filename
+                    if file_path.exists():
+                        model_path = file_path
+                        logger.info(f"Найдена предварительно скачанная модель: {file_path}")
+                        break
+                
+                if model_path:
+                    try:
+                        # Загружаем модель из файла
+                        import torch
+                        _whisper_model = whisper.load_model(model_name, download_root=str(Path(MODELS_DIR)))
+                        _current_model_name = model_name
+                        model_found = True
+                        logger.info(f"Модель Whisper {model_name} успешно загружена из {model_path}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при загрузке модели из файла {model_path}: {e}")
+                
+            # Если модель не найдена локально, загружаем стандартным способом
+            if not model_found:
+                # Загружаем модель (скачивается автоматически, если её нет)
+                _whisper_model = whisper.load_model(model_name, download_root=str(Path(MODELS_DIR)))
+                _current_model_name = model_name
+                logger.info(f"Модель Whisper {model_name} успешно загружена")
         except Exception as e:
             logger.error(f"Ошибка при загрузке модели Whisper: {e}")
             raise
@@ -84,6 +126,8 @@ def list_downloaded_models():
             return []
             
         available_models = []
+        
+        # Сначала проверяем основную директорию
         for item in models_path.iterdir():
             if item.is_dir() and (item / "model.bin").exists():
                 model_name = item.name
@@ -93,6 +137,35 @@ def list_downloaded_models():
                     "size_mb": size_mb,
                     "path": str(item)
                 })
+        
+        # Также проверяем подпапку whisper, где могут быть .pt файлы
+        whisper_dir = models_path / "whisper"
+        if whisper_dir.exists() and whisper_dir.is_dir():
+            for item in whisper_dir.iterdir():
+                if item.is_file() and item.suffix.lower() == '.pt':
+                    # Убираем суффикс .pt для получения имени модели
+                    model_name = item.stem
+                    # Если имя заканчивается на -turbo, меняем на turbo
+                    if model_name.endswith('-turbo'):
+                        model_name = "turbo"
+                    # Очищаем от возможных версий
+                    for prefix in ['-v2', '-v3']:
+                        if prefix in model_name:
+                            model_name = model_name.split(prefix)[0]
+                            
+                    size_mb = get_model_size(model_name)
+                    file_size_mb = round(item.stat().st_size / (1024 * 1024))
+                    
+                    # Используем фактический размер файла, если размер из таблицы равен 0
+                    if size_mb == 0:
+                        size_mb = file_size_mb
+                    
+                    available_models.append({
+                        "name": model_name,
+                        "size_mb": size_mb,
+                        "file_size_mb": file_size_mb,
+                        "path": str(item)
+                    })
         
         return available_models
     except Exception as e:
@@ -237,6 +310,17 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             elapsed_time = time.time() - start_time
             audio_duration = result.get("duration", 0)
             ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
+            
+            # Добавляем информацию о том, что модель была переключена
+            actual_model_used = model_name
+            if is_large_file and model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                actual_model_used = "small"
+                
+            # Добавляем метаданные о транскрибации
+            result["whisper_model"] = actual_model_used
+            result["processing_time"] = elapsed_time
+            result["file_size_mb"] = file_size_mb
+            result["processing_ratio"] = ratio
             
             logger.info(f"Транскрипция завершена за {elapsed_time:.2f} сек. " 
                         f"Длительность аудио: {audio_duration:.2f} сек. "

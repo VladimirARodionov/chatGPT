@@ -377,8 +377,29 @@ async def cmd_models(message: types.Message):
         
         # Формируем сообщение
         models_text = "📚 Скачанные модели Whisper:\n\n"
+        
+        # Группируем модели по имени для более наглядного отображения
+        grouped_models = {}
         for model in models:
-            models_text += f"• {model['name']} ({model['size_mb']} MB)\n"
+            name = model['name']
+            if name not in grouped_models:
+                grouped_models[name] = []
+            grouped_models[name].append(model)
+        
+        # Формируем текст списка моделей
+        for name, model_variants in grouped_models.items():
+            # Выбираем самую большую/последнюю версию модели для отображения размера
+            latest_model = max(model_variants, key=lambda m: m.get('file_size_mb', m.get('size_mb', 0)))
+            size_mb = latest_model.get('size_mb', 0)
+            
+            if len(model_variants) > 1:
+                # Если есть несколько вариантов одной модели
+                variant_info = ", ".join([os.path.basename(m['path']) for m in model_variants])
+                models_text += f"• {name} ({size_mb} MB) - {variant_info}\n"
+            else:
+                # Если только один вариант
+                file_path = os.path.basename(latest_model['path'])
+                models_text += f"• {name} ({size_mb} MB) - {file_path}\n"
         
         models_text += f"\nТекущая модель: {WHISPER_MODEL}"
         models_text += f"\nДиректория моделей: {WHISPER_MODELS_DIR}"
@@ -864,6 +885,19 @@ async def background_audio_processor():
                     # Сообщаем о начале транскрибации
                     await processing_msg.edit_text(f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\nЭто может занять некоторое время в зависимости от длины аудио. Вы можете продолжать использовать бота.")
                     
+                    # Проверяем размер файла для предупреждения о возможном переключении модели
+                    try:
+                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        if file_size_mb > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                            await processing_msg.edit_text(
+                                f"Транскрибирую аудио...\n\n"
+                                f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
+                                f"поэтому вместо модели {WHISPER_MODEL} будет использована модель small для оптимизации памяти.\n\n"
+                                f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
+                            )
+                    except Exception as e:
+                        logger.exception(f"Ошибка при проверке размера файла: {e}")
+                    
                     # Запускаем транскрибацию в отдельном потоке, чтобы не блокировать event loop
                     loop = asyncio.get_event_loop()
                     try:
@@ -881,12 +915,21 @@ async def background_audio_processor():
                             elapsed = (datetime.now() - start_time).total_seconds()
                             if elapsed > 0 and elapsed % 30 < 1:  # примерно каждые 30 секунд
                                 time_str = str(timedelta(seconds=int(elapsed)))
-                                await processing_msg.edit_text(
+                                
+                                # Определяем, какая модель используется
+                                current_model = WHISPER_MODEL
+                                if os.path.getsize(file_path) / (1024 * 1024) > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                                    current_model = "small (автоматически выбрана для большого файла)"
+                                
+                                status_message = (
                                     f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                     f"⏱ Прошло времени: {time_str}\n"
-                                    f"Файл: {file_name}\n\n"
+                                    f"📁 Файл: {file_name}\n"
+                                    f"🎯 Модель: {current_model}\n\n"
                                     f"Вы можете продолжать использовать бота для других задач."
                                 )
+                                
+                                await processing_msg.edit_text(status_message)
                             
                             # Небольшая пауза, чтобы не нагружать процессор
                             await asyncio.sleep(1)
@@ -925,6 +968,25 @@ async def background_audio_processor():
                     
                     # Формируем текстовое сообщение
                     message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
+                    
+                    # Определяем, какая модель использовалась
+                    used_model = WHISPER_MODEL
+                    
+                    # Пытаемся получить информацию о фактически использованной модели из результата
+                    if isinstance(transcription, dict) and "whisper_model" in transcription:
+                        used_model = transcription.get("whisper_model")
+                        
+                        # Если использована модель отличается от заданной, добавляем информацию
+                        if used_model != WHISPER_MODEL:
+                            processing_time = transcription.get("processing_time", 0)
+                            processing_time_str = f" (время обработки: {processing_time:.1f} сек)" if processing_time > 0 else ""
+                            message_text += f"ℹ️ Использована модель {used_model} вместо {WHISPER_MODEL} для оптимизации памяти{processing_time_str}.\n\n"
+                    else:
+                        # Если информации нет в результате, используем приблизительную проверку по размеру файла
+                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
+                        if file_size_mb > 20 and WHISPER_MODEL in ["medium", "large", "large-v2", "large-v3", "turbo"]:
+                            used_model = "small"
+                            message_text += f"ℹ️ Для обработки использована модель small вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
                     
                     # Получаем текст транскрибации
                     transcription_text = transcription
