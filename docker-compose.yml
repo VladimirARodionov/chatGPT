@@ -55,10 +55,10 @@ services:
       - TZ=${TZ}
       - LOCAL_BOT_API=${LOCAL_BOT_API:-http://telegram-bot-api:8082}
     volumes:
-      - app_logs:/app/logs
-      - app_temp_audio:/app/temp_audio
-      - app_transcriptions:/app/transcriptions
-      - app_whisper_models:/app/whisper_models
+      - ./logs:/app/logs
+      - ./temp_audio:/app/temp_audio
+      - ./transcriptions:/app/transcriptions
+      - ./whisper_models:/app/whisper_models
     restart: always
     depends_on:
       postgres:
@@ -69,7 +69,3 @@ services:
 volumes:
   postgres_data:
   telegram_bot_api_data:
-  app_logs:
-  app_temp_audio:
-  app_transcriptions:
-  app_whisper_models:
