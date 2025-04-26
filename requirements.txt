@@ -7,3 +7,6 @@ SQLAlchemy==2.0.38
 alembic==1.14.1
 psycopg2-binary==2.9.10
 fluent.runtime==0.4.0
+git+https://github.com/openai/whisper.git
+pydub==0.25.1
+ffmpeg-python==0.2.0

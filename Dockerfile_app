@@ -3,6 +3,7 @@ FROM python:3.13-slim-bullseye
 
 # Install apt packages
 RUN apt-get update
+RUN apt-get install -y git ffmpeg
 # && apt-get install -y --no-install-recommends \
 #    python3-venv \
 #    && rm -rf /var/lib/apt/lists/*

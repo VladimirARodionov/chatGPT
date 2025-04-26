@@ -31,6 +31,9 @@ services:
       - TZ=${TZ}
     volumes:
       - ./logs:/app/logs
+      - ./temp_audio:/app/temp_audio
+      - ./transcriptions:/app/transcriptions
+      - ./whisper_models:/app/whisper_models
     restart: always
     depends_on:
       postgres:
