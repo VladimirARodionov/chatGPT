@@ -8,7 +8,7 @@ if [ ! -z "$LOCAL_BOT_API" ]; then
   
   # Если порт не указан, используем 8081 по умолчанию
   if [ -z "$PORT" ]; then
-    PORT=8081
+    PORT=8082
   fi
   
   echo "Проверка соединения с Local Bot API Server: $HOST:$PORT"
