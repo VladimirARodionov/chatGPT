@@ -166,7 +166,7 @@ def save_transcription_to_file(text, user_id):
     """Сохраняет транскрибированный текст в файл
     
     Args:
-        text: Текст транскрибации
+        text: Текст транскрибации или словарь с результатами
         user_id: ID пользователя
         
     Returns:
@@ -175,10 +175,43 @@ def save_transcription_to_file(text, user_id):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{TRANSCRIPTION_DIR}/transcription_{user_id}_{timestamp}.txt"
     
-    with open(filename, "w", encoding="utf-8") as file:
-        file.write(str(text))
+    # Обрабатываем разные форматы результатов транскрибации
+    if isinstance(text, dict):
+        # Если результат в формате словаря Whisper, извлекаем текст и дополнительные данные
+        transcription_text = text.get('text', '')
+        language = text.get('language', 'Не определен')
+        segments = text.get('segments', [])
+        
+        with open(filename, "w", encoding="utf-8") as file:
+            file.write(f"Транскрибация аудио\n")
+            file.write(f"Дата и время: {timestamp}\n")
+            file.write(f"Язык: {language}\n")
+            file.write(f"ID пользователя: {user_id}\n\n")
+            file.write("=== ПОЛНЫЙ ТЕКСТ ===\n\n")
+            file.write(transcription_text)
+            
+            # Если есть сегменты, добавляем детальную информацию с таймкодами
+            if segments:
+                file.write("\n\n=== ДЕТАЛЬНАЯ ТРАНСКРИБАЦИЯ С ТАЙМКОДАМИ ===\n\n")
+                for i, segment in enumerate(segments):
+                    start = segment.get('start', 0)
+                    end = segment.get('end', 0)
+                    segment_text = segment.get('text', '')
+                    file.write(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {segment_text}\n")
+    else:
+        # Просто сохраняем текст, если это строка или другой формат
+        with open(filename, "w", encoding="utf-8") as file:
+            file.write(str(text))
     
     return filename
+
+def format_timestamp(seconds):
+    """Форматирует время в секундах в формат часы:минуты:секунды,миллисекунды"""
+    milliseconds = int((seconds % 1) * 1000)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds = int(seconds % 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
 def split_text_into_chunks(text, max_length=MAX_MESSAGE_LENGTH):
     """Разделяет длинный текст на части с учетом границ предложений
@@ -600,7 +633,10 @@ async def download_large_file_direct(file_id, destination, bot_token):
             logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
     elif file_path.startswith('/var/lib/telegram-bot-api'):
         # Пытаемся использовать настраиваемый путь к файлам Local Bot API
-        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', (pathlib.Path(__file__).resolve().parent / LOCAL_BOT_API_FILES_PATH))
+        bot_files_path = str(pathlib.Path(__file__).resolve().parent / LOCAL_BOT_API_FILES_PATH)
+        bot_specific_path = file_path.replace('/var/lib/telegram-bot-api', bot_files_path)
+        
+        logger.info(f"Пробуем найти файл по настраиваемому пути: {bot_specific_path}")
         
         if os.path.isfile(bot_specific_path) and os.access(bot_specific_path, os.R_OK):
             try:
@@ -868,11 +904,17 @@ async def background_audio_processor():
                     # Формируем текстовое сообщение
                     message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
                     
+                    # Получаем текст транскрибации
+                    transcription_text = transcription
+                    # Если результат в формате словаря, извлекаем текст
+                    if isinstance(transcription, dict):
+                        transcription_text = transcription.get('text', '')
+                    
                     # Если текст слишком длинный, разбиваем на части
-                    if len(transcription) > MAX_MESSAGE_LENGTH - len(message_text):
+                    if len(transcription_text) > MAX_MESSAGE_LENGTH - len(message_text):
                         # Отправляем превью транскрибации
                         preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
-                        preview_text = transcription[:preview_length] + "...\n\n(полный текст в файле)"
+                        preview_text = transcription_text[:preview_length] + "...\n\n(полный текст в файле)"
                         await processing_msg.edit_text(message_text + preview_text)
                         
                         # Отправляем файл с полной транскрибацией безопасным способом
@@ -883,7 +925,7 @@ async def background_audio_processor():
                         )
                     else:
                         # Для коротких транскрибаций просто отправляем весь текст
-                        await processing_msg.edit_text(message_text + transcription)
+                        await processing_msg.edit_text(message_text + transcription_text)
                         
                         # Отправляем файл для удобства
                         await send_file_safely(
