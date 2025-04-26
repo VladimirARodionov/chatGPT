@@ -18,6 +18,7 @@ os.environ['XDG_CACHE_HOME'] = str(Path(MODELS_DIR).absolute())
 
 # Глобальная переменная для хранения модели
 _whisper_model = None
+_current_model_name = None
 
 def get_whisper_model(model_name="base"):
     """
@@ -31,8 +32,9 @@ def get_whisper_model(model_name="base"):
         Загруженная модель Whisper
     """
     global _whisper_model
+    global _current_model_name
     
-    if _whisper_model is None or _whisper_model.name != model_name:
+    if _whisper_model is None or _current_model_name != model_name:
         logger.info(f"Загрузка модели Whisper: {model_name}")
         try:
             # Сообщаем о директории, где будет храниться модель
@@ -41,6 +43,7 @@ def get_whisper_model(model_name="base"):
             
             # Загружаем модель (скачивается автоматически, если её нет)
             _whisper_model = whisper.load_model(model_name)
+            _current_model_name = model_name
             logger.info(f"Модель Whisper {model_name} успешно загружена")
         except Exception as e:
             logger.error(f"Ошибка при загрузке модели Whisper: {e}")
@@ -121,9 +124,29 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         logger.info(f"Размер файла: {file_size_mb:.2f} МБ")
         
+        # Дополнительная проверка файла
+        try:
+            import wave
+            if file_path.lower().endswith('.wav'):
+                try:
+                    with wave.open(file_path, 'rb') as wave_file:
+                        frames = wave_file.getnframes()
+                        rate = wave_file.getframerate()
+                        duration = frames / float(rate)
+                        logger.info(f"WAV файл: {frames} фреймов, {rate} Гц, длительность: {duration:.2f} сек")
+                except Exception as wave_error:
+                    logger.warning(f"Не удалось прочитать WAV файл: {wave_error}")
+        except ImportError:
+            logger.warning("Модуль wave не установлен, пропускаем дополнительную проверку WAV")
+            
         # Загружаем модель
-        model = get_whisper_model(model_name)
-        if model is None:
+        try:
+            model = get_whisper_model(model_name)
+            if model is None:
+                logger.error("Не удалось загрузить модель Whisper")
+                return None
+        except Exception as model_error:
+            logger.exception(f"Ошибка при загрузке модели Whisper: {model_error}")
             return None
             
         # Проверяем свободную память перед началом транскрипции
@@ -149,21 +172,45 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             # Можно также переключиться на более легкую модель, если текущая слишком тяжелая
             if model_name in ["medium", "large", "large-v2", "large-v3", "turbo"]:
                 logger.info(f"Для большого файла временно переключаемся с модели {model_name} на small для экономии памяти")
-                model = get_whisper_model("small")
+                try:
+                    model = get_whisper_model("small")
+                    if model is None:
+                        logger.error("Не удалось загрузить облегченную модель для большого файла")
+                        return None
+                except Exception as model_error:
+                    logger.warning(f"Ошибка при переключении на облегченную модель: {model_error}, продолжаем с исходной")
                 
         # Выполняем транскрипцию
-        result = model.transcribe(file_path, **transcribe_options)
-        
-        # Засекаем время выполнения
-        elapsed_time = time.time() - start_time
-        audio_duration = result.get("duration", 0)
-        ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
-        
-        logger.info(f"Транскрипция завершена за {elapsed_time:.2f} сек. " 
-                    f"Длительность аудио: {audio_duration:.2f} сек. "
-                    f"Соотношение: {ratio:.2f}x")
-                    
-        return result
+        try:
+            logger.info(f"Запускаем транскрибацию с опциями: {transcribe_options}")
+            result = model.transcribe(file_path, **transcribe_options)
+            
+            if not result:
+                logger.error("Транскрибация вернула пустой результат")
+                return None
+                
+            if 'text' not in result:
+                logger.error(f"Транскрибация вернула неожиданный формат результата: {result.keys() if hasattr(result, 'keys') else type(result)}")
+                return None
+                
+            # Проверяем, не пустой ли текст
+            if not result['text'].strip():
+                logger.warning("Транскрибация вернула пустой текст")
+                
+            # Засекаем время выполнения
+            elapsed_time = time.time() - start_time
+            audio_duration = result.get("duration", 0)
+            ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
+            
+            logger.info(f"Транскрипция завершена за {elapsed_time:.2f} сек. " 
+                        f"Длительность аудио: {audio_duration:.2f} сек. "
+                        f"Соотношение: {ratio:.2f}x")
+                        
+            return result
+        except Exception as transcribe_error:
+            logger.exception(f"Ошибка при выполнении транскрибации: {transcribe_error}")
+            return None
+            
     except Exception as e:
         logger.exception(f"Ошибка при транскрипции файла {file_path}: {e}")
         return None

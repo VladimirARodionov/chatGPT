@@ -898,6 +898,28 @@ async def background_audio_processor():
                         logger.exception(f"Ошибка при асинхронной транскрибации: {e}")
                         raise
                     
+                    # Проверяем, получили ли мы результат
+                    if transcription is None:
+                        # Если транскрибация не удалась, сообщаем об ошибке
+                        await processing_msg.edit_text(
+                            f"❌ Ошибка при транскрибации аудио: {file_name}\n\n"
+                            f"Не удалось обработать аудиофайл. Возможные причины:\n"
+                            f"• Файл повреждён или имеет неподдерживаемый формат\n"
+                            f"• Аудио не содержит речи или имеет слишком низкое качество\n"
+                            f"• Ошибка при обработке модели Whisper\n\n"
+                            f"Пожалуйста, попробуйте отправить другой аудиофайл или обратитесь к администратору."
+                        )
+                        
+                        # Удаляем временные файлы
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            logger.exception(f"Ошибка при удалении временных файлов: {e}")
+                        
+                        # Отмечаем задачу как выполненную
+                        audio_task_queue.task_done()
+                        continue
+                    
                     # Сохраняем транскрибацию в файл
                     transcript_file_path = save_transcription_to_file(transcription, user_id)
                     
@@ -909,6 +931,23 @@ async def background_audio_processor():
                     # Если результат в формате словаря, извлекаем текст
                     if isinstance(transcription, dict):
                         transcription_text = transcription.get('text', '')
+                    
+                    # Проверяем, не пустой ли текст транскрибации
+                    if not transcription_text:
+                        await processing_msg.edit_text(
+                            f"⚠️ Предупреждение: Транскрибация аудио не содержит текста.\n\n"
+                            f"Возможно, аудио не содержит распознаваемой речи или имеет слишком низкое качество."
+                        )
+                        
+                        # Удаляем временные файлы
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            logger.exception(f"Ошибка при удалении временных файлов: {e}")
+                        
+                        # Отмечаем задачу как выполненную
+                        audio_task_queue.task_done()
+                        continue
                     
                     # Если текст слишком длинный, разбиваем на части
                     if len(transcription_text) > MAX_MESSAGE_LENGTH - len(message_text):
