@@ -6,7 +6,6 @@ from pathlib import Path
 import time
 import subprocess
 import json
-import asyncio
 
 from create_bot import env_config
 
