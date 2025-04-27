@@ -111,7 +111,8 @@ background_worker_running = False
 active_transcriptions = {}
 
 # Путь для сохранения очереди
-QUEUE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_queue.json")
+QUEUE_DIR = "queue"
+QUEUE_SAVE_PATH = os.path.join(QUEUE_DIR, "saved_queue.json")
 
 async def set_commands():
     """Установка команд бота в меню"""
@@ -1684,6 +1685,11 @@ async def save_queue_to_file():
     Сохраняет текущую очередь задач в JSON файл
     """
     try:
+        # Проверяем наличие директории queue, создаем если нет
+        if not os.path.exists(QUEUE_DIR):
+            os.makedirs(QUEUE_DIR, exist_ok=True)
+            logger.info(f"Создана директория для сохранения очереди: {QUEUE_DIR}")
+            
         # Получаем все элементы из очереди
         queue_items = []
         temp_queue = asyncio.Queue()
