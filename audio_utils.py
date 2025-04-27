@@ -245,11 +245,19 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
                         frames = wave_file.getnframes()
                         rate = wave_file.getframerate()
                         duration = frames / float(rate)
-                        logger.info(f"WAV файл: {frames} фреймов, {rate} Гц, длительность: {duration:.2f} сек")
+                        channels = wave_file.getnchannels()
+                        sample_width = wave_file.getsampwidth()
+                        
+                        logger.info(f"WAV файл: {frames} фреймов, {rate} Гц, {channels} каналов, {sample_width} байт/сэмпл, длительность: {duration:.2f} сек")
                         
                         # Если ffprobe не определил длительность, используем информацию из wave
                         if audio_duration == 0:
                             audio_duration = duration
+                            
+                        # Проверяем, что файл имеет фреймы и не пустой
+                        if frames == 0:
+                            logger.error("WAV файл не содержит аудио данных (0 фреймов)")
+                            return None
                 except Exception as wave_error:
                     logger.warning(f"Не удалось прочитать WAV файл: {wave_error}")
         except ImportError:
@@ -260,6 +268,54 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             estimated_duration = file_size_mb * 60  # Приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
             logger.info(f"Используем оценочную длительность на основе размера файла: {estimated_duration:.2f} сек")
             audio_duration = estimated_duration
+            
+        # Дополнительная проверка файла с помощью ffmpeg
+        try:
+            # Получаем информацию об аудио-каналах и убеждаемся, что аудио содержит данные
+            ffmpeg_result = subprocess.run(
+                [
+                    "ffmpeg", 
+                    "-v", "error", 
+                    "-i", file_path, 
+                    "-f", "null", 
+                    "-"
+                ],
+                capture_output=True,
+                text=True
+            )
+            
+            # Если ffmpeg выдал ошибку, это может указывать на проблемы с файлом
+            if ffmpeg_result.returncode != 0:
+                logger.error(f"Ошибка при проверке файла с помощью ffmpeg: {ffmpeg_result.stderr}")
+                
+                # Если ошибка связана с данными аудио, можно попробовать исправить
+                if "Invalid data found" in ffmpeg_result.stderr:
+                    logger.warning("Обнаружены некорректные данные в аудиофайле, пробуем исправить")
+                    
+                    # Создаем новый файл с исправленными данными
+                    fixed_file_path = f"{file_path}.fixed.wav"
+                    fix_result = subprocess.run(
+                        [
+                            "ffmpeg", 
+                            "-v", "warning", 
+                            "-i", file_path, 
+                            "-ar", "16000",  # Устанавливаем частоту дискретизации 16kHz
+                            "-ac", "1",      # Преобразуем в моно
+                            "-c:a", "pcm_s16le",  # Используем стандартный формат PCM
+                            fixed_file_path
+                        ],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if fix_result.returncode == 0 and os.path.exists(fixed_file_path) and os.path.getsize(fixed_file_path) > 0:
+                        logger.info(f"Аудиофайл исправлен и сохранен в {fixed_file_path}")
+                        file_path = fixed_file_path  # Используем исправленный файл для транскрибации
+                    else:
+                        logger.error(f"Не удалось исправить аудиофайл: {fix_result.stderr}")
+                        return None
+        except Exception as e:
+            logger.warning(f"Ошибка при выполнении проверки через ffmpeg: {e}")
             
         # Загружаем модель
         try:
@@ -342,9 +398,115 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
                     logger.warning("Не удалось проверить память GPU, так как torch недоступен")
                 except Exception as e:
                     logger.warning(f"Ошибка при проверке памяти GPU: {e}")
+            
+            # Безопасно загружаем аудиофайл перед транскрибацией
+            try:
+                import torch
+                import numpy as np
+                from whisper.audio import SAMPLE_RATE, N_FRAMES, log_mel_spectrogram, pad_or_trim
+                
+                # Для безопасной загрузки аудио используем функцию из whisper
+                logger.info("Загружаем аудиофайл перед транскрибацией")
+                
+                # Проверяем, что файл существует и не равен 0
+                if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
+                    logger.error(f"Файл не найден или пуст: {file_path}")
+                    return None
+                
+                # Пробуем загрузить аудио напрямую через ffmpeg
+                try:
+                    cmd = ["ffmpeg", "-i", file_path, "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"]
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    output, stderr = process.communicate()
                     
-            # Выполняем транскрибацию
-            result = model.transcribe(file_path, **transcribe_options)
+                    if process.returncode != 0:
+                        logger.error(f"Ошибка при загрузке аудио через ffmpeg: {stderr.decode()}")
+                        return None
+                        
+                    if len(output) == 0:
+                        logger.error("Загруженное аудио не содержит данных")
+                        return None
+                        
+                    # Преобразуем байты в numpy array
+                    audio = np.frombuffer(output, np.int16).astype(np.float32) / 32768.0
+                    
+                    # Проверяем, что audio не пустой и содержит данные
+                    if len(audio) == 0:
+                        logger.error("Аудио не содержит данных после загрузки")
+                        return None
+                    
+                    logger.info(f"Успешно загружено аудио длиной {len(audio) / SAMPLE_RATE:.2f} сек")
+                    
+                    # Вычисляем мел-спектрограмму
+                    mel = log_mel_spectrogram(audio)
+                    
+                    # Проверяем, что mel не пустой
+                    if mel.shape[0] == 0 or mel.shape[1] == 0:
+                        logger.error(f"Мел-спектрограмма имеет неверный размер: {mel.shape}")
+                        return None
+                    
+                    # Проверяем, что тензор не содержит NaN
+                    if torch.isnan(mel).any():
+                        logger.error("Мел-спектрограмма содержит NaN значения")
+                        return None
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при предварительной обработке аудио: {e}")
+                    # Продолжаем с обычной загрузкой через whisper
+            except ImportError:
+                logger.warning("Не удалось выполнить предварительную проверку аудио, продолжаем с обычной загрузкой")
+            except Exception as e:
+                logger.warning(f"Непредвиденная ошибка при проверке аудио: {e}")
+                
+            # Выполняем транскрибацию с обработкой потенциальных ошибок тензора
+            try:
+                result = model.transcribe(file_path, **transcribe_options)
+            except RuntimeError as e:
+                # Обрабатываем ошибку reshape тензора
+                if "cannot reshape tensor of 0 elements" in str(e):
+                    logger.error(f"Ошибка тензора нулевого размера при транскрибации: {e}")
+                    logger.info("Пробуем конвертировать файл в стандартный формат и повторить попытку")
+                    
+                    # Создаем новый файл с исправленными данными
+                    fixed_file_path = f"{file_path}.fixed.wav"
+                    try:
+                        convert_result = subprocess.run(
+                            [
+                                "ffmpeg", 
+                                "-y",  # Перезаписать существующий файл
+                                "-v", "warning", 
+                                "-i", file_path, 
+                                "-ar", "16000",  # Устанавливаем частоту дискретизации 16kHz (как в примерах Whisper)
+                                "-ac", "1",      # Преобразуем в моно
+                                "-c:a", "pcm_s16le",  # Используем стандартный формат PCM
+                                fixed_file_path
+                            ],
+                            capture_output=True,
+                            text=True
+                        )
+                        
+                        if convert_result.returncode == 0 and os.path.exists(fixed_file_path) and os.path.getsize(fixed_file_path) > 0:
+                            logger.info(f"Аудиофайл конвертирован и сохранен в {fixed_file_path}, пробуем транскрибировать заново")
+                            
+                            # Пробуем транскрибировать исправленный файл
+                            try:
+                                result = model.transcribe(fixed_file_path, **transcribe_options)
+                            except Exception as retry_error:
+                                logger.error(f"Не удалось транскрибировать даже после исправления файла: {retry_error}")
+                                return None
+                        else:
+                            logger.error(f"Не удалось конвертировать файл: {convert_result.stderr}")
+                            return None
+                    except Exception as convert_error:
+                        logger.error(f"Ошибка при конвертации файла: {convert_error}")
+                        return None
+                else:
+                    # Другие ошибки RuntimeError
+                    logger.error(f"Ошибка RuntimeError при транскрибации: {e}")
+                    return None
+            except Exception as transcribe_error:
+                logger.exception(f"Ошибка при выполнении транскрибации: {transcribe_error}")
+                return None
             
             if not result:
                 logger.error("Транскрибация вернула пустой результат")
@@ -424,6 +586,14 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
                         f"Длительность аудио: {audio_duration:.2f} сек. "
                         f"Соотношение: {ratio:.2f}x")
                         
+            # Удаляем временные исправленные файлы
+            try:
+                if 'fixed_file_path' in locals() and os.path.exists(fixed_file_path):
+                    os.remove(fixed_file_path)
+                    logger.info(f"Удален временный исправленный файл: {fixed_file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Ошибка при удалении временного файла: {cleanup_error}")
+                
             return result
         except Exception as transcribe_error:
             logger.exception(f"Ошибка при выполнении транскрибации: {transcribe_error}")
