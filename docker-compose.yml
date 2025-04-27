@@ -59,6 +59,7 @@ services:
       - ./temp_audio:/app/temp_audio
       - ./transcriptions:/app/transcriptions
       - ./whisper_models:/app/whisper_models
+      - ./telegram_bot_api_data:/app/telegram_bot_api_data
     restart: always
     depends_on:
       postgres:
