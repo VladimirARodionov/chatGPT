@@ -29,7 +29,7 @@ echo "Порт: $PORT"
     --dir=/var/lib/telegram-bot-api \
     --temp-dir=/tmp/telegram-bot-api \
     --log=/var/log/telegram-bot-api/bot-api.log \
-    --verbosity=1 > /var/log/telegram-bot-api/stdout.log 2>&1 &
+    --verbosity=2 > /var/log/telegram-bot-api/stdout.log 2>&1 &
 
 # Сохраняем PID процесса
 BOT_API_PID=$!
