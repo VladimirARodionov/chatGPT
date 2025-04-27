@@ -1047,7 +1047,7 @@ async def background_audio_processor():
                 # Каждые 10 циклов выполняем очистку старых файлов
                 if cleanup_counter >= 10:
                     cleanup_counter = 0
-                    logger.debug("Запуск периодической очистки временных файлов")
+                    # logger.debug("Запуск периодической очистки временных файлов")
                     cleanup_temp_files(older_than_hours=24)
                 
                 # Получаем задачу из очереди (с таймаутом, чтобы можно было корректно завершить поток)
