@@ -184,5 +184,7 @@ cython_debug/
 *.json
 /queue/*.json
 /temp_audio/audio_**
+/temp_audio/converted_**
 /transcriptions/transcription_**
 /telegram_bot_api_data/**
+whisper_models/*.pt
