@@ -1682,7 +1682,7 @@ async def handle_message(message: types.Message):
 # Функция для сохранения очереди в файл
 async def save_queue_to_file():
     """
-    Сохраняет текущую очередь задач в JSON файл
+    Сохраняет текущую очередь задач и активные транскрибации в JSON файл
     """
     try:
         # Проверяем наличие директории queue, создаем если нет
@@ -1694,10 +1694,35 @@ async def save_queue_to_file():
         queue_items = []
         temp_queue = asyncio.Queue()
         
+        # Сохраняем активные транскрибации
+        active_items = []
+        for user_id, (future, message_id, file_path) in active_transcriptions.items():
+            # Пропускаем отмененные задачи
+            if future == "cancelled":
+                continue
+                
+            try:
+                # Поскольку future не может быть сериализован напрямую, 
+                # сохраняем только метаданные задачи
+                if os.path.exists(file_path):
+                    serializable_active_item = {
+                        "user_id": user_id,
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "message_id": message_id,
+                        "chat_id": await get_chat_id_by_message_id(message_id, user_id),
+                        "timestamp": time.time(),
+                        "is_active": True  # Пометка, что это активная задача
+                    }
+                    active_items.append(serializable_active_item)
+                    logger.info(f"Сохранена активная задача транскрибации: user_id={user_id}, file={os.path.basename(file_path)}")
+            except Exception as e:
+                logger.warning(f"Ошибка при сохранении активной задачи для пользователя {user_id}: {e}")
+        
         # Сохраняем размер очереди
         queue_size = audio_task_queue.qsize()
-        if queue_size == 0:
-            logger.info("Очередь пуста, нечего сохранять")
+        if queue_size == 0 and not active_items:
+            logger.info("Очередь пуста и нет активных задач, нечего сохранять")
             
             # Если файл существует - удаляем его
             if os.path.exists(QUEUE_SAVE_PATH):
@@ -1705,7 +1730,7 @@ async def save_queue_to_file():
                 logger.info(f"Удален файл с сохраненной очередью: {QUEUE_SAVE_PATH}")
             return
             
-        logger.info(f"Сохранение очереди заданий, количество элементов: {queue_size}")
+        logger.info(f"Сохранение очереди заданий: {queue_size} в очереди, {len(active_items)} активных")
         
         # Извлекаем все элементы из очереди во временный список
         for _ in range(queue_size):
@@ -1723,7 +1748,8 @@ async def save_queue_to_file():
                         "file_name": file_name,
                         "message_id": processing_msg.message_id,
                         "chat_id": processing_msg.chat.id,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "is_active": False  # Пометка, что это задача в очереди
                     }
                     queue_items.append(serializable_item)
                     
@@ -1736,11 +1762,15 @@ async def save_queue_to_file():
         while not temp_queue.empty():
             audio_task_queue.put_nowait(temp_queue.get_nowait())
         
+        # Объединяем активные задачи и задачи в очереди
+        all_items = active_items + queue_items
+        
         # Сохраняем данные в файл
-        if queue_items:
+        if all_items:
             with open(QUEUE_SAVE_PATH, 'w', encoding='utf-8') as f:
-                json.dump(queue_items, f, ensure_ascii=False, indent=2)
-            logger.info(f"Очередь заданий сохранена в файл: {QUEUE_SAVE_PATH}, элементов: {len(queue_items)}")
+                json.dump(all_items, f, ensure_ascii=False, indent=2)
+            logger.info(f"Очередь заданий сохранена в файл: {QUEUE_SAVE_PATH}, "
+                       f"элементов: {len(all_items)} (активных: {len(active_items)}, в очереди: {len(queue_items)})")
         else:
             logger.info("Нет заданий для сохранения")
             
@@ -1750,6 +1780,18 @@ async def save_queue_to_file():
                 
     except Exception as e:
         logger.exception(f"Ошибка при сохранении очереди в файл: {e}")
+
+# Вспомогательная функция для получения chat_id по message_id
+async def get_chat_id_by_message_id(message_id, user_id):
+    """
+    Пытается получить chat_id по message_id для сохранения активной задачи
+    """
+    try:
+        # В большинстве случаев chat_id совпадает с user_id для личных сообщений
+        return user_id
+    except Exception:
+        # Если не удалось получить, используем user_id как fallback
+        return user_id
 
 # Функция для загрузки очереди из файла
 async def load_queue_from_file():
@@ -1770,6 +1812,11 @@ async def load_queue_from_file():
             
         logger.info(f"Загружаем сохраненную очередь заданий, элементов: {len(saved_items)}")
         
+        # Считаем количество активных задач
+        active_count = sum(1 for item in saved_items if item.get("is_active", False))
+        queue_count = len(saved_items) - active_count
+        logger.info(f"Найдено {active_count} активных задач и {queue_count} задач в очереди")
+        
         # Сортируем задания по timestamp (сначала старые)
         saved_items.sort(key=lambda x: x.get("timestamp", 0))
         
@@ -1781,6 +1828,7 @@ async def load_queue_from_file():
             file_name = item.get("file_name")
             message_id = item.get("message_id")
             chat_id = item.get("chat_id")
+            is_active = item.get("is_active", False)
             
             # Проверяем существование файла
             if file_path and os.path.exists(file_path):
@@ -1791,15 +1839,22 @@ async def load_queue_from_file():
                         # Пробуем получить сообщение из Telegram
                         chat = types.Chat(id=chat_id, type="private")
                         message = types.Message(message_id=message_id, chat=chat, date=int(time.time()))
+                        
+                        # Разные сообщения для активных задач и задач в очереди
+                        if is_active:
+                            status_text = "⚠️ Активная задача транскрибации восстановлена после перезапуска и будет запущена заново..."
+                        else:
+                            status_text = "🔄 Задача восстановлена после перезапуска и добавлена в очередь..."
+                            
                         processing_msg = await bot.edit_message_text(
-                            "🔄 Задание восстановлено после перезапуска и добавлено в очередь...",
+                            status_text,
                             chat_id=chat_id,
                             message_id=message_id
                         )
                         
                         # Добавляем задание в очередь
                         await audio_task_queue.put((message, file_path, processing_msg, user_id, file_name))
-                        logger.info(f"Восстановлено задание: user_id={user_id}, file={file_name}")
+                        logger.info(f"Восстановлено задание: user_id={user_id}, file={file_name}, активное={is_active}")
                         restored_count += 1
                     except Exception as msg_error:
                         logger.warning(f"Не удалось восстановить сообщение для задания: {msg_error}")
