@@ -395,9 +395,9 @@ def should_use_smaller_model(file_size_mb, model_name):
     file_size_threshold = 20  # МБ
     
     # Проверяем, нужно ли переключаться на меньшую модель
-    if file_size_mb > file_size_threshold and model_name in heavy_models:
+    #if file_size_mb > file_size_threshold and model_name in heavy_models:
         # По умолчанию используем small для больших файлов
-        return True, "small"
+        #return True, "small"
     
     # Модель менять не нужно
     return False, model_name 
