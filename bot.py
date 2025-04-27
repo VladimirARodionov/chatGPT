@@ -1834,7 +1834,7 @@ async def save_queue_to_file():
         # Сохраняем размер очереди
         queue_size = audio_task_queue.qsize()
         if queue_size == 0 and not active_items:
-            logger.info("Очередь пуста и нет активных задач, нечего сохранять")
+            #logger.debug("Очередь пуста и нет активных задач, нечего сохранять")
             
             # Если файл существует - удаляем его
             if os.path.exists(QUEUE_SAVE_PATH):
