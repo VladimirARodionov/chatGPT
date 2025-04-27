@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 import subprocess
 import json
+import asyncio
 
 from create_bot import env_config
 
@@ -168,7 +169,7 @@ def get_model_name_from_file(filename):
             
     return base_name
 
-async def transcribe_with_whisper(file_path, language=None, model_name="small"):
+async def transcribe_with_whisper(file_path, language=None, model_name="small", condition_on_previous_text=True):
     """
     Транскрибирует аудиофайл с помощью модели Whisper.
     
@@ -176,6 +177,7 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
         file_path: Путь к аудиофайлу
         language: Код языка (опционально)
         model_name: Название модели Whisper
+        condition_on_previous_text: Если False, отключает авторегрессию и предотвращает зацикливание текста
         
     Returns:
         Результат транскрибации (словарь с текстом и метаданными) или None в случае ошибки
@@ -183,6 +185,7 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
     try:
         start_time = time.time()
         logger.info(f"Начинаем транскрибацию файла {file_path} с использованием модели {model_name}")
+        logger.info(f"Параметр condition_on_previous_text: {condition_on_previous_text}")
         
         # Проверяем существование файла
         if not os.path.isfile(file_path):
@@ -342,6 +345,7 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             "language": language,
             "verbose": None,
             "task": "transcribe",
+            "condition_on_previous_text": condition_on_previous_text,
         }
         
         # Для больших файлов добавляем дополнительные опции оптимизации
@@ -652,7 +656,7 @@ def should_use_smaller_model(file_size_mb, model_name):
     heavy_models = ["medium", "large", "large-v2", "large-v3", "turbo"]
     
     # Пороги размера файла для переключения на модель меньшего размера
-    file_size_threshold = 20  # МБ
+    file_size_threshold = 10  # МБ
     
     # Проверяем, нужно ли переключаться на меньшую модель
     if file_size_mb > file_size_threshold and model_name in heavy_models:

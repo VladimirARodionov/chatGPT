@@ -1010,7 +1010,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
             os.remove(destination)
         return False
 
-async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
+async def transcribe_audio(file_path, should_switch = False, use_local_whisper=USE_LOCAL_WHISPER):
     """Транскрибация аудио с использованием OpenAI API или локальной модели Whisper"""
     try:
         if use_local_whisper:
@@ -1020,7 +1020,8 @@ async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
             # Используем локальную модель Whisper
             transcription = await transcribe_with_whisper(
                 converted_file, 
-                model_name=WHISPER_MODEL
+                model_name=WHISPER_MODEL,
+                condition_on_previous_text=should_switch
             )
             
             # Удаляем конвертированный файл если он отличается от оригинала
@@ -1229,7 +1230,7 @@ async def background_audio_processor():
                         future = loop.run_in_executor(
                             thread_executor,
                             # Оборачиваем асинхронную функцию в синхронную
-                            lambda fp=file_path: asyncio.run(transcribe_audio(fp))
+                            lambda fp=file_path: asyncio.run(transcribe_audio(fp, should_switch))
                         )
                         
                         # Сохраняем информацию о текущей задаче в словаре активных задач
