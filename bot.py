@@ -1065,10 +1065,67 @@ async def background_audio_processor():
                     # Распаковываем данные задачи
                     message, file_path, processing_msg, user_id, file_name = task
                     
+                    # Проверка и исправление from_user (если нужно)
+                    if not hasattr(message, 'from_user') or message.from_user is None:
+                        # Если from_user отсутствует, создаем его
+                        from_user = types.User(
+                            id=user_id,
+                            is_bot=False,
+                            first_name="Восстановлено",
+                            last_name="",
+                            username="restored_user",
+                            language_code="ru"
+                        )
+                        message.from_user = from_user
+                        logger.info(f"Добавлен атрибут from_user для восстановленного сообщения (user_id={user_id})")
+                    
                     # Получаем данные пользователя для транскрибации
-                    username = message.from_user.username
-                    first_name = message.from_user.first_name
-                    last_name = message.from_user.last_name
+                    try:
+                        username = message.from_user.username
+                        if username is None:
+                            message.from_user.username = "restored_user"
+                            username = "restored_user"
+                            logger.info(f"Пользователь не имеет username, установлен restored_user (user_id={user_id})")
+                            
+                        first_name = message.from_user.first_name
+                        if first_name is None:
+                            message.from_user.first_name = "Восстановлено"
+                            first_name = "Восстановлено"
+                            
+                        last_name = message.from_user.last_name
+                        if last_name is None:
+                            message.from_user.last_name = ""
+                            last_name = ""
+                    except AttributeError as e:
+                        logger.warning(f"Ошибка при получении данных пользователя, пробуем исправить: {e}")
+                        # Если у from_user нет нужных атрибутов, добавляем их
+                        try:
+                            if not hasattr(message.from_user, 'username'):
+                                message.from_user.username = "restored_user"
+                            if not hasattr(message.from_user, 'first_name'):
+                                message.from_user.first_name = "Восстановлено"
+                            if not hasattr(message.from_user, 'last_name'):
+                                message.from_user.last_name = ""
+                                
+                            username = message.from_user.username
+                            first_name = message.from_user.first_name
+                            last_name = message.from_user.last_name
+                            logger.info(f"Атрибуты пользователя добавлены (user_id={user_id})")
+                        except Exception as fix_err:
+                            # Если не удалось добавить атрибуты, создаем новый from_user
+                            logger.error(f"Не удалось добавить атрибуты, создаем новый from_user: {fix_err}")
+                            from_user = types.User(
+                                id=user_id,
+                                is_bot=False,
+                                first_name="Восстановлено",
+                                last_name="",
+                                username="restored_user",
+                                language_code="ru"
+                            )
+                            message.from_user = from_user
+                            username = "restored_user"
+                            first_name = "Восстановлено"
+                            last_name = ""
                     
                     # Проверяем, не отменена ли задача
                     if user_id in active_transcriptions and active_transcriptions[user_id][0] == "cancelled":
@@ -1812,11 +1869,6 @@ async def load_queue_from_file():
             
         logger.info(f"Загружаем сохраненную очередь заданий, элементов: {len(saved_items)}")
         
-        # Считаем количество активных задач
-        active_count = sum(1 for item in saved_items if item.get("is_active", False))
-        queue_count = len(saved_items) - active_count
-        logger.info(f"Найдено {active_count} активных задач и {queue_count} задач в очереди")
-        
         # Сортируем задания по timestamp (сначала старые)
         saved_items.sort(key=lambda x: x.get("timestamp", 0))
         
@@ -1838,7 +1890,24 @@ async def load_queue_from_file():
                     try:
                         # Пробуем получить сообщение из Telegram
                         chat = types.Chat(id=chat_id, type="private")
-                        message = types.Message(message_id=message_id, chat=chat, date=int(time.time()))
+                        
+                        # Создаем фиктивный объект пользователя для восстановленных сообщений
+                        from_user = types.User(
+                            id=user_id,
+                            is_bot=False,
+                            first_name="Восстановлено",
+                            last_name="",
+                            username="restored_user",
+                            language_code="ru"
+                        )
+                        
+                        # Создаем объект сообщения с from_user
+                        message = types.Message(
+                            message_id=message_id, 
+                            chat=chat, 
+                            date=int(time.time()),
+                            from_user=from_user
+                        )
                         
                         # Разные сообщения для активных задач и задач в очереди
                         if is_active:
@@ -1846,11 +1915,20 @@ async def load_queue_from_file():
                         else:
                             status_text = "🔄 Задача восстановлена после перезапуска и добавлена в очередь..."
                             
-                        processing_msg = await bot.edit_message_text(
-                            status_text,
-                            chat_id=chat_id,
-                            message_id=message_id
-                        )
+                        try:
+                            # Пробуем редактировать старое сообщение
+                            processing_msg = await bot.edit_message_text(
+                                status_text,
+                                chat_id=chat_id,
+                                message_id=message_id
+                            )
+                        except Exception as edit_error:
+                            logger.warning(f"Не удалось отредактировать сообщение {message_id}: {edit_error}")
+                            # Отправляем новое сообщение, если не получилось отредактировать старое
+                            processing_msg = await bot.send_message(
+                                chat_id=chat_id,
+                                text=f"{status_text}\n(Оригинальное сообщение не найдено)"
+                            )
                         
                         # Добавляем задание в очередь
                         await audio_task_queue.put((message, file_path, processing_msg, user_id, file_name))
