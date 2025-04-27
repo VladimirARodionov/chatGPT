@@ -16,7 +16,7 @@ MODELS_DIR = env_config.get('WHISPER_MODELS_DIR', 'whisper_models')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # Устанавливаем переменную окружения для кеширования моделей
-os.environ['XDG_CACHE_HOME'] = str(Path(MODELS_DIR).absolute())
+os.environ['XDG_CACHE_HOME'] = str(Path(MODELS_DIR).parent.absolute())
 
 # Глобальная переменная для хранения модели
 _whisper_model = None
@@ -39,56 +39,37 @@ def get_whisper_model(model_name="base"):
     if _whisper_model is None or _current_model_name != model_name:
         logger.info(f"Загрузка модели Whisper: {model_name}")
         try:
-            # Сообщаем о директории, где будет храниться модель
-            model_dir = Path(MODELS_DIR) / model_name
-            logger.info(f"Директория для моделей Whisper: {os.environ['XDG_CACHE_HOME']}")
+            # Используем единую директорию для моделей (без дублирования)
+            logger.info(f"Директория для моделей Whisper: {MODELS_DIR}")
             
-            # Сначала проверяем наличие предварительно загруженной модели в папке whisper
-            model_found = False
-            whisper_dir = Path(MODELS_DIR) / "whisper"
+            # Проверяем наличие моделей
+            model_files = []
+            for filename in os.listdir(MODELS_DIR):
+                filepath = os.path.join(MODELS_DIR, filename)
+                if os.path.isfile(filepath) and filename.endswith('.pt'):
+                    model_files.append(filepath)
             
-            if whisper_dir.exists() and whisper_dir.is_dir():
-                # Возможные варианты имен файлов для данной модели
-                possible_filenames = [
-                    f"{model_name}.pt",
-                    f"{model_name}-v2.pt",
-                    f"{model_name}-v3.pt"
-                ]
-                
-                # Особая обработка для turbo модели
-                if model_name == "turbo":
-                    possible_filenames.extend([
-                        "large-v3-turbo.pt", 
-                        "large-v2-turbo.pt", 
-                        "large-turbo.pt"
-                    ])
-                
-                # Ищем файл в подпапке whisper
-                model_path = None
-                for filename in possible_filenames:
-                    file_path = whisper_dir / filename
-                    if file_path.exists():
-                        model_path = file_path
-                        logger.info(f"Найдена предварительно скачанная модель: {file_path}")
+            if model_files:
+                logger.info(f"Найдены модели в директории: {model_files}")
+            
+            # Загружаем модель
+            _whisper_model = whisper.load_model(model_name, download_root=MODELS_DIR)
+            _current_model_name = model_name
+            logger.info(f"Модель Whisper {model_name} успешно загружена")
+            
+            # Проверяем, не осталось ли дубликатов в подпапке whisper
+            whisper_subdir = os.path.join(MODELS_DIR, "whisper")
+            if os.path.exists(whisper_subdir) and os.path.isdir(whisper_subdir):
+                # Проверяем, есть ли в подпапке модели
+                has_models = False
+                for filename in os.listdir(whisper_subdir):
+                    if filename.endswith('.pt'):
+                        has_models = True
                         break
                 
-                if model_path:
-                    try:
-                        # Загружаем модель из файла
-                        import torch
-                        _whisper_model = whisper.load_model(model_name, download_root=str(Path(MODELS_DIR)))
-                        _current_model_name = model_name
-                        model_found = True
-                        logger.info(f"Модель Whisper {model_name} успешно загружена из {model_path}")
-                    except Exception as e:
-                        logger.error(f"Ошибка при загрузке модели из файла {model_path}: {e}")
-                
-            # Если модель не найдена локально, загружаем стандартным способом
-            if not model_found:
-                # Загружаем модель (скачивается автоматически, если её нет)
-                _whisper_model = whisper.load_model(model_name, download_root=str(Path(MODELS_DIR)))
-                _current_model_name = model_name
-                logger.info(f"Модель Whisper {model_name} успешно загружена")
+                if has_models:
+                    logger.warning(f"Обнаружены дублирующиеся модели в подпапке {whisper_subdir}. "
+                                  f"Рекомендуется переместить их в {MODELS_DIR} и удалить подпапку для экономии места.")
         except Exception as e:
             logger.error(f"Ошибка при загрузке модели Whisper: {e}")
             raise
@@ -109,6 +90,7 @@ def get_model_size(model_name):
         "medium": 769,
         "medium.en": 769,
         "large": 1550,
+        "large-v1": 1550,
         "large-v2": 1550,
         "large-v3": 1550,
         "turbo": 809
@@ -129,50 +111,62 @@ def list_downloaded_models():
             
         available_models = []
         
-        # Сначала проверяем основную директорию
-        for item in models_path.iterdir():
-            if item.is_dir() and (item / "model.bin").exists():
-                model_name = item.name
-                size_mb = get_model_size(model_name)
+        # Ищем все .pt файлы в основной директории
+        for item in models_path.glob('*.pt'):
+            if item.is_file():
+                # Определяем имя модели из имени файла
+                model_name = get_model_name_from_file(item.name)
+                size_mb = get_model_size(model_name) or round(item.stat().st_size / (1024 * 1024))
                 available_models.append({
                     "name": model_name,
                     "size_mb": size_mb,
-                    "path": str(item)
+                    "path": str(item),
+                    "location": "основная директория"
                 })
         
-        # Также проверяем подпапку whisper, где могут быть .pt файлы
+        # Также проверяем подпапку whisper, где могут быть .pt файлы (для обратной совместимости)
         whisper_dir = models_path / "whisper"
         if whisper_dir.exists() and whisper_dir.is_dir():
-            for item in whisper_dir.iterdir():
-                if item.is_file() and item.suffix.lower() == '.pt':
-                    # Убираем суффикс .pt для получения имени модели
-                    model_name = item.stem
-                    # Если имя заканчивается на -turbo, меняем на turbo
-                    if model_name.endswith('-turbo'):
-                        model_name = "turbo"
-                    # Очищаем от возможных версий
-                    for prefix in ['-v2', '-v3']:
-                        if prefix in model_name:
-                            model_name = model_name.split(prefix)[0]
-                            
-                    size_mb = get_model_size(model_name)
-                    file_size_mb = round(item.stat().st_size / (1024 * 1024))
-                    
-                    # Используем фактический размер файла, если размер из таблицы равен 0
-                    if size_mb == 0:
-                        size_mb = file_size_mb
-                    
+            for item in whisper_dir.glob('*.pt'):
+                if item.is_file():
+                    # Определяем имя модели из имени файла
+                    model_name = get_model_name_from_file(item.name)
+                    size_mb = get_model_size(model_name) or round(item.stat().st_size / (1024 * 1024))
                     available_models.append({
                         "name": model_name,
                         "size_mb": size_mb,
-                        "file_size_mb": file_size_mb,
-                        "path": str(item)
+                        "path": str(item),
+                        "location": "подпапка whisper (дубликат)"
                     })
         
         return available_models
     except Exception as e:
         logger.error(f"Ошибка при проверке доступных моделей: {e}")
         return []
+
+def get_model_name_from_file(filename):
+    """
+    Определяет название модели из имени файла
+    
+    Args:
+        filename: Имя файла модели (например, large-v3.pt)
+        
+    Returns:
+        Название модели (например, large)
+    """
+    # Убираем расширение .pt
+    base_name = filename.replace('.pt', '')
+    
+    # Обработка специальных случаев
+    if base_name.endswith('-turbo') or 'turbo' in base_name:
+        return "turbo"
+        
+    # Удаляем версии (v1, v2, v3)
+    for version in ['-v1', '-v2', '-v3']:
+        if version in base_name:
+            base_name = base_name.split(version)[0]
+            
+    return base_name
 
 async def transcribe_with_whisper(file_path, language=None, model_name="small"):
     """
