@@ -6,7 +6,6 @@ from pathlib import Path
 import time
 import subprocess
 import json
-import asyncio
 
 from create_bot import env_config
 
@@ -739,7 +738,7 @@ def predict_processing_time(file_path, model_name):
         "large-v1": 0.8, # аналогично large
         "large-v2": 0.7, # немного медленнее чем large-v1
         "large-v3": 0.6, # самая медленная
-        "turbo": 1.0     # примерно такая же скорость, как реальное время
+        "turbo": 0.6
     }
     
     # Получаем коэффициент для выбранной модели, или используем значение по умолчанию

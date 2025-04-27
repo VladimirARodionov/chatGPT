@@ -4,6 +4,7 @@ import pathlib
 
 import sqlalchemy
 import decouple
+from aiogram import Bot
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", default="DEVELOPMENT")
 
@@ -50,3 +51,50 @@ logging.getLogger('aiogram.dispatcher').propagate = False
 logging.getLogger('aiogram.event').propagate = False
 
 superusers = [int(superuser_id) for superuser_id in env_config.get('SUPERUSERS').split(',')]
+
+
+logger = logging.getLogger(__name__)
+
+# Получаем URL локального Bot API сервера из .env файла
+LOCAL_BOT_API = env_config.get('LOCAL_BOT_API', None)
+# Путь к директории с файлами Local Bot API на локальной файловой системе
+LOCAL_BOT_API_FILES_PATH = env_config.get('LOCAL_BOT_API_FILES_PATH', 'telegram_bot_api_data')
+
+# Инициализация бота и диспетчера
+if LOCAL_BOT_API:
+    bot = Bot(token=env_config.get('TELEGRAM_TOKEN'), base_url=LOCAL_BOT_API)
+    logger.info(f'Используется локальный Telegram Bot API сервер: {LOCAL_BOT_API}')
+    if os.path.exists(LOCAL_BOT_API_FILES_PATH):
+        logger.info(f'Директория с файлами Local Bot API доступна: {LOCAL_BOT_API_FILES_PATH}')
+    else:
+        logger.warning(f'Директория с файлами Local Bot API недоступна: {LOCAL_BOT_API_FILES_PATH}')
+else:
+    bot = Bot(token=env_config.get('TELEGRAM_TOKEN'))
+
+# Настройки для Whisper
+WHISPER_MODEL = env_config.get('WHISPER_MODEL', 'base')
+USE_LOCAL_WHISPER = env_config.get('USE_LOCAL_WHISPER', 'True').lower() in ('true', '1', 'yes')
+WHISPER_MODELS_DIR = env_config.get('WHISPER_MODELS_DIR', 'whisper_models')
+
+# Директории для файлов
+TEMP_AUDIO_DIR = "temp_audio"
+TRANSCRIPTION_DIR = "transcriptions"
+
+# Ограничения для Telegram
+MAX_MESSAGE_LENGTH = 4096  # максимальная длина сообщения в Telegram
+MAX_CAPTION_LENGTH = 1024  # максимальная длина подписи к файлу
+
+# Устанавливаем лимиты в зависимости от использования локального Bot API
+STANDARD_API_LIMIT = 20 * 1024 * 1024  # 20 МБ для обычного Bot API
+MAX_FILE_SIZE = STANDARD_API_LIMIT
+
+if LOCAL_BOT_API:
+    MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2000 МБ для локального Bot API
+    logger.info(f'Используется увеличенный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
+else:
+    logger.info(f'Используется стандартный лимит файлов: {MAX_FILE_SIZE/1024/1024:.1f} МБ')
+
+# Создаем директории, если они не существуют
+os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+os.makedirs(TRANSCRIPTION_DIR, exist_ok=True)
+os.makedirs(WHISPER_MODELS_DIR, exist_ok=True)
