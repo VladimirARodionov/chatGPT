@@ -349,7 +349,11 @@ async def send_file_safely(message, file_path, caption=None):
         
         if file_size > MAX_FILE_SIZE:
             # Файл слишком большой, разделяем его на части
-            await message.answer("Файл слишком большой для отправки, разделяю на части...")
+            # Проверяем, привязан ли message к боту
+            if hasattr(message, "bot") and message.bot is not None:
+                await message.answer("Файл слишком большой для отправки, разделяю на части...")
+            else:
+                await bot.send_message(chat_id=message.chat.id, text="Файл слишком большой для отправки, разделяю на части...")
             
             # Читаем содержимое файла
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -371,38 +375,85 @@ async def send_file_safely(message, file_path, caption=None):
                     part_caption = f"{caption}\n\n{part_caption}"
                 
                 # Отправляем файл
-                await message.answer_document(
-                    FSInputFile(part_filename),
-                    caption=part_caption[:MAX_CAPTION_LENGTH]
-                )
+                try:
+                    if hasattr(message, "bot") and message.bot is not None:
+                        await message.answer_document(
+                            FSInputFile(part_filename),
+                            caption=part_caption[:MAX_CAPTION_LENGTH]
+                        )
+                    else:
+                        await bot.send_document(
+                            chat_id=message.chat.id,
+                            document=FSInputFile(part_filename),
+                            caption=part_caption[:MAX_CAPTION_LENGTH]
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке части файла {i+1}: {e}")
+                    # Пробуем через основной метод если частичный не сработал
+                    if hasattr(message, "bot") and message.bot is not None:
+                        await message.answer(f"Ошибка при отправке части {i+1}: {str(e)}")
+                    else:
+                        await bot.send_message(chat_id=message.chat.id, text=f"Ошибка при отправке части {i+1}: {str(e)}")
             
             return True
         else:
             # Обычная отправка файла
             if caption and len(caption) > MAX_CAPTION_LENGTH:
                 caption = caption[:MAX_CAPTION_LENGTH-3] + "..."
-                
-            await message.answer_document(
-                FSInputFile(file_path),
-                caption=caption
-            )
-            return True
+            
+            try:
+                if hasattr(message, "bot") and message.bot is not None:
+                    await message.answer_document(
+                        FSInputFile(file_path),
+                        caption=caption
+                    )
+                else:
+                    await bot.send_document(
+                        chat_id=message.chat.id,
+                        document=FSInputFile(file_path),
+                        caption=caption
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"Ошибка при отправке файла: {e}")
+                # Пробуем сообщить об ошибке
+                if hasattr(message, "bot") and message.bot is not None:
+                    await message.answer(f"Произошла ошибка при отправке файла: {str(e)}")
+                else:
+                    await bot.send_message(chat_id=message.chat.id, text=f"Произошла ошибка при отправке файла: {str(e)}")
+                return False
             
     except TelegramBadRequest as e:
         if "file is too big" in str(e).lower():
             # Если все равно получаем ошибку о большом размере файла
             logger.error(f"Файл {file_path} слишком большой для отправки через Telegram API: {e}")
-            await message.answer(
-                "Файл слишком большой для отправки через Telegram. "
-                "Попробуйте транскрибировать аудио меньшей длительности."
-            )
+            if hasattr(message, "bot") and message.bot is not None:
+                await message.answer(
+                    "Файл слишком большой для отправки через Telegram. "
+                    "Попробуйте транскрибировать аудио меньшей длительности."
+                )
+            else:
+                await bot.send_message(
+                    chat_id=message.chat.id, 
+                    text="Файл слишком большой для отправки через Telegram. "
+                         "Попробуйте транскрибировать аудио меньшей длительности."
+                )
         else:
             logger.exception(f"Ошибка Telegram при отправке файла: {e}")
-            await message.answer(f"Ошибка при отправке файла: {str(e)}")
+            if hasattr(message, "bot") and message.bot is not None:
+                await message.answer(f"Ошибка при отправке файла: {str(e)}")
+            else:
+                await bot.send_message(chat_id=message.chat.id, text=f"Ошибка при отправке файла: {str(e)}")
         return False
     except Exception as e:
         logger.exception(f"Ошибка при отправке файла: {e}")
-        await message.answer(f"Произошла ошибка при отправке файла: {str(e)}")
+        try:
+            if hasattr(message, "bot") and message.bot is not None:
+                await message.answer(f"Произошла ошибка при отправке файла: {str(e)}")
+            else:
+                await bot.send_message(chat_id=message.chat.id, text=f"Произошла ошибка при отправке файла: {str(e)}")
+        except Exception as msg_error:
+            logger.exception(f"Не удалось отправить сообщение об ошибке: {msg_error}")
         return False
 
 @dp.message(Command("start"))
