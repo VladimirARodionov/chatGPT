@@ -5,6 +5,10 @@ import os
 from datetime import datetime, timedelta
 import re
 from concurrent.futures import ThreadPoolExecutor
+import json
+import time
+import shutil
+import signal
 
 from alembic import command
 from alembic.config import Config
@@ -105,6 +109,9 @@ background_worker_running = False
 # Словарь для отслеживания активных задач транскрибации по пользователям
 # Ключ - user_id, значение - (future, message_id, file_path)
 active_transcriptions = {}
+
+# Путь для сохранения очереди
+QUEUE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_queue.json")
 
 async def set_commands():
     """Установка команд бота в меню"""
@@ -1671,6 +1678,197 @@ async def handle_message(message: types.Message):
         logger.exception(f"Произошла ошибка при обработке сообщения: {e}")
         await processing_msg.edit_text(f"Произошла ошибка при обработке сообщения: {str(e)}")
 
+# Функция для сохранения очереди в файл
+async def save_queue_to_file():
+    """
+    Сохраняет текущую очередь задач в JSON файл
+    """
+    try:
+        # Получаем все элементы из очереди
+        queue_items = []
+        temp_queue = asyncio.Queue()
+        
+        # Сохраняем размер очереди
+        queue_size = audio_task_queue.qsize()
+        if queue_size == 0:
+            logger.info("Очередь пуста, нечего сохранять")
+            
+            # Если файл существует - удаляем его
+            if os.path.exists(QUEUE_SAVE_PATH):
+                os.remove(QUEUE_SAVE_PATH)
+                logger.info(f"Удален файл с сохраненной очередью: {QUEUE_SAVE_PATH}")
+            return
+            
+        logger.info(f"Сохранение очереди заданий, количество элементов: {queue_size}")
+        
+        # Извлекаем все элементы из очереди во временный список
+        for _ in range(queue_size):
+            try:
+                item = audio_task_queue.get_nowait()
+                
+                # Разбираем кортеж
+                message, file_path, processing_msg, user_id, file_name = item
+                
+                # Сохраняем только необходимые данные, которые можно сериализовать
+                if os.path.exists(file_path):
+                    serializable_item = {
+                        "user_id": user_id,
+                        "file_path": file_path,
+                        "file_name": file_name,
+                        "message_id": processing_msg.message_id,
+                        "chat_id": processing_msg.chat.id,
+                        "timestamp": time.time()
+                    }
+                    queue_items.append(serializable_item)
+                    
+                # Возвращаем элемент обратно в очередь
+                temp_queue.put_nowait(item)
+            except asyncio.QueueEmpty:
+                break
+        
+        # Восстанавливаем основную очередь
+        while not temp_queue.empty():
+            audio_task_queue.put_nowait(temp_queue.get_nowait())
+        
+        # Сохраняем данные в файл
+        if queue_items:
+            with open(QUEUE_SAVE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(queue_items, f, ensure_ascii=False, indent=2)
+            logger.info(f"Очередь заданий сохранена в файл: {QUEUE_SAVE_PATH}, элементов: {len(queue_items)}")
+        else:
+            logger.info("Нет заданий для сохранения")
+            
+            # Если файл существует - удаляем его
+            if os.path.exists(QUEUE_SAVE_PATH):
+                os.remove(QUEUE_SAVE_PATH)
+                
+    except Exception as e:
+        logger.exception(f"Ошибка при сохранении очереди в файл: {e}")
+
+# Функция для загрузки очереди из файла
+async def load_queue_from_file():
+    """
+    Загружает сохраненную очередь задач из JSON файла
+    """
+    try:
+        if not os.path.exists(QUEUE_SAVE_PATH):
+            logger.info(f"Файл с сохраненной очередью не найден: {QUEUE_SAVE_PATH}")
+            return 0
+            
+        with open(QUEUE_SAVE_PATH, 'r', encoding='utf-8') as f:
+            saved_items = json.load(f)
+            
+        if not saved_items:
+            logger.info("Сохраненная очередь пуста")
+            return 0
+            
+        logger.info(f"Загружаем сохраненную очередь заданий, элементов: {len(saved_items)}")
+        
+        # Сортируем задания по timestamp (сначала старые)
+        saved_items.sort(key=lambda x: x.get("timestamp", 0))
+        
+        # Проверяем каждый файл и добавляем его в очередь
+        restored_count = 0
+        for item in saved_items:
+            user_id = item.get("user_id")
+            file_path = item.get("file_path")
+            file_name = item.get("file_name")
+            message_id = item.get("message_id")
+            chat_id = item.get("chat_id")
+            
+            # Проверяем существование файла
+            if file_path and os.path.exists(file_path):
+                try:
+                    # Создаем объекты, необходимые для очереди
+                    # Нам нужно загрузить сообщение из Telegram для ответа
+                    try:
+                        # Пробуем получить сообщение из Telegram
+                        chat = types.Chat(id=chat_id, type="private")
+                        message = types.Message(message_id=message_id, chat=chat, date=int(time.time()))
+                        processing_msg = await bot.edit_message_text(
+                            "🔄 Задание восстановлено после перезапуска и добавлено в очередь...",
+                            chat_id=chat_id,
+                            message_id=message_id
+                        )
+                        
+                        # Добавляем задание в очередь
+                        await audio_task_queue.put((message, file_path, processing_msg, user_id, file_name))
+                        logger.info(f"Восстановлено задание: user_id={user_id}, file={file_name}")
+                        restored_count += 1
+                    except Exception as msg_error:
+                        logger.warning(f"Не удалось восстановить сообщение для задания: {msg_error}")
+                        continue
+                        
+                except Exception as e:
+                    logger.warning(f"Ошибка при восстановлении задания {file_name}: {e}")
+            else:
+                logger.warning(f"Файл не найден при восстановлении очереди: {file_path}")
+        
+        # Удаляем файл сохранения, чтобы не восстанавливать дважды
+        if os.path.exists(QUEUE_SAVE_PATH):
+            os.remove(QUEUE_SAVE_PATH)
+            
+        logger.info(f"Восстановление очереди завершено. Восстановлено заданий: {restored_count} из {len(saved_items)}")
+        return restored_count
+        
+    except Exception as e:
+        logger.exception(f"Ошибка при загрузке очереди из файла: {e}")
+        return 0
+
+# Периодическое сохранение очереди
+async def periodic_queue_save():
+    """
+    Периодически сохраняет очередь задач в файл
+    """
+    while True:
+        try:
+            await save_queue_to_file()
+        except Exception as e:
+            logger.error(f"Ошибка при периодическом сохранении очереди: {e}")
+            
+        # Сохраняем каждые 60 секунд
+        await asyncio.sleep(60)
+
+# Функция для обработки сигналов завершения
+async def shutdown(signal, loop):
+    """
+    Корректное завершение при получении сигнала
+    """
+    logger.info(f"Получен сигнал {signal.name}, выполняем корректное завершение...")
+    
+    # Сохраняем очередь перед выключением
+    await save_queue_to_file()
+    
+    # Останавливаем задачи
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    
+    for task in tasks:
+        task.cancel()
+    
+    logger.info(f"Отменено {len(tasks)} задач")
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    loop.stop()
+    logger.info("Завершение работы бота")
+    
+async def register_shutdown_handler():
+    """
+    Регистрирует обработчик сигналов завершения
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        
+        # Регистрируем обработчики сигналов для SIGINT и SIGTERM
+        for sig in [signal.SIGINT, signal.SIGTERM]:
+            loop.add_signal_handler(
+                sig, lambda s=sig: asyncio.create_task(shutdown(s, loop))
+            )
+        logger.info("Зарегистрированы обработчики сигналов завершения")
+    except NotImplementedError:
+        # Windows не поддерживает add_signal_handler
+        logger.info("Регистрация обработчиков сигналов не поддерживается на этой платформе")
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации обработчиков сигналов: {e}")
 
 async def main():
     logger.info('Бот запущен.')
@@ -1682,14 +1880,30 @@ async def main():
         cleanup_temp_files(older_than_hours=24)
         logger.info('Выполнена очистка старых временных файлов')
         
+        # Проверяем и настраиваем доступ к файлам Telegram Bot API
+        #await check_bot_api_files_access()
+        #logger.info('Проверен доступ к файлам Telegram Bot API')
+        
+        # Восстанавливаем сохраненную очередь
+        restored_count = await load_queue_from_file()
+        if restored_count > 0:
+            logger.info(f'Восстановлено {restored_count} заданий из сохраненной очереди')
+        
         # Запускаем фоновый обработчик очереди
         background_task = asyncio.create_task(background_audio_processor())
         logger.info('Запущен фоновый обработчик очереди аудиофайлов')
         
+        # Запускаем периодическое сохранение очереди
+        save_task = asyncio.create_task(periodic_queue_save())
+        logger.info('Запущено периодическое сохранение очереди')
+        
+        # Регистрируем обработчики сигналов завершения
+        await register_shutdown_handler()
+        
         # Устанавливаем команды в меню бота
         await set_commands()
         logger.info('Команды бота установлены')
-        
+
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except KeyboardInterrupt:
@@ -1699,6 +1913,104 @@ async def main():
     finally:
         await bot.session.close()
         logger.info('Бот остановлен.')
+
+# Функция для проверки доступа к файлам Bot API
+async def check_bot_api_files_access():
+    """
+    Проверяет и настраивает доступ к файлам Local Bot API
+    для решения проблем с правами доступа в Docker томах
+    """
+    if not LOCAL_BOT_API:
+        return
+        
+    try:
+        # Проверяем, существует ли папка с файлами Telegram Bot API
+        bot_api_dir = LOCAL_BOT_API_FILES_PATH
+        if not os.path.exists(bot_api_dir):
+            logger.warning(f"Директория с файлами Telegram Bot API не найдена: {bot_api_dir}")
+            return
+            
+        if not os.path.isdir(bot_api_dir):
+            logger.warning(f"Путь не является директорией: {bot_api_dir}")
+            return
+            
+        logger.info(f"Проверка файлов в директории {bot_api_dir}")
+        
+        # Ищем поддиректории с токеном бота
+        token_dirs = []
+        for item in os.listdir(bot_api_dir):
+            item_path = os.path.join(bot_api_dir, item)
+            if os.path.isdir(item_path) and ':' in item:  # Предположительно директория с токеном бота
+                token_dirs.append(item_path)
+                
+        if not token_dirs:
+            logger.info(f"Не найдены директории с токенами ботов в {bot_api_dir}")
+            return
+            
+        for token_dir in token_dirs:
+            logger.info(f"Проверка директории с токеном: {token_dir}")
+            
+            # Проверяем наличие поддиректории music
+            music_dir = os.path.join(token_dir, 'music')
+            if os.path.exists(music_dir) and os.path.isdir(music_dir):
+                logger.info(f"Проверка прав доступа в директории музыки: {music_dir}")
+                
+                # Получаем список всех файлов
+                try:
+                    files = os.listdir(music_dir)
+                    logger.info(f"Найдено {len(files)} файлов в директории {music_dir}")
+                    
+                    # Проверяем каждый файл и исправляем права доступа при необходимости
+                    for file_name in files:
+                        file_path = os.path.join(music_dir, file_name)
+                        if not os.path.isfile(file_path):
+                            continue
+                            
+                        # Проверяем текущие права доступа
+                        if not os.access(file_path, os.R_OK):
+                            logger.warning(f"Не хватает прав доступа к файлу: {file_path}")
+                            
+                            try:
+                                import stat
+                                # Получаем текущие права доступа
+                                current_perms = os.stat(file_path).st_mode
+                                logger.info(f"Текущие права: {oct(current_perms)}")
+                                
+                                # Пробуем изменить права доступа для чтения
+                                try:
+                                    # Устанавливаем права на чтение для всех
+                                    new_perms = current_perms | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+                                    os.chmod(file_path, new_perms)
+                                    logger.info(f"Права доступа изменены на: {oct(os.stat(file_path).st_mode)}")
+                                    
+                                    # Проверяем, помогло ли изменение прав
+                                    if os.access(file_path, os.R_OK):
+                                        logger.info(f"Файл теперь доступен для чтения: {file_path}")
+                                    else:
+                                        logger.warning(f"Файл все еще недоступен после изменения прав: {file_path}")
+                                except (PermissionError, OSError) as chmod_error:
+                                    logger.warning(f"Не удалось изменить права доступа: {chmod_error}")
+                                    
+                                    # Пробуем через sudo
+                                    try:
+                                        import subprocess
+                                        cmd = f"sudo chmod a+r '{file_path}'"
+                                        process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                                        if process.returncode == 0:
+                                            logger.info(f"Права доступа успешно изменены через sudo для файла: {file_path}")
+                                        else:
+                                            logger.warning(f"Не удалось изменить права через sudo: {process.stderr}")
+                                    except Exception as sudo_error:
+                                        logger.warning(f"Ошибка при использовании sudo: {sudo_error}")
+                            except Exception as e:
+                                logger.warning(f"Ошибка при проверке/изменении прав доступа: {e}")
+                except (PermissionError, OSError) as e:
+                    logger.error(f"Ошибка при чтении файлов из директории {music_dir}: {e}")
+            else:
+                logger.info(f"Директория music не найдена в {token_dir}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка при проверке доступа к файлам Telegram Bot API: {e}")
 
 if __name__ == "__main__":
     try:
