@@ -181,3 +181,5 @@ cython_debug/
 
 # PostgreSQL backups
 /pg_backups/*
+*.json
+/queue/*.json

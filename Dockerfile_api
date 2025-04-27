@@ -1,0 +1,53 @@
+# Dockerfile для Telegram Bot API Server
+FROM ubuntu:22.04
+
+# Установка необходимых зависимостей
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
+    cmake \
+    gperf \
+    git \
+    libssl-dev \
+    zlib1g-dev \
+    ninja-build \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Клонирование репозитория telegram-bot-api
+WORKDIR /src
+RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
+
+# Сборка telegram-bot-api
+WORKDIR /src/telegram-bot-api
+RUN mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=/usr/local .. && \
+    cmake --build . --target install
+
+# Создание рабочей директории
+WORKDIR /app
+
+# Создание необходимых директорий для логов и данных
+RUN mkdir -p /var/lib/telegram-bot-api /tmp/telegram-bot-api /var/log/telegram-bot-api && \
+    chmod -R 777 /var/lib/telegram-bot-api /tmp/telegram-bot-api /var/log/telegram-bot-api
+
+# Копирование скрипта запуска и healthcheck
+COPY start_bot_api.sh /app/start_bot_api.sh
+COPY api_healthcheck.sh /app/api_healthcheck.sh
+RUN chmod +x /app/start_bot_api.sh /app/api_healthcheck.sh
+
+# Установка переменной окружения для настройки API сервера
+ENV API_ID=""
+ENV API_HASH=""
+ENV API_PORT=8082
+
+# Открытие порта
+EXPOSE ${API_PORT}
+
+# Проверка работоспособности
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 CMD /app/api_healthcheck.sh
+
+# Запуск telegram-bot-api сервера
+CMD ["/app/start_bot_api.sh"] 
