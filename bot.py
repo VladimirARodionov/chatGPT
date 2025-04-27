@@ -25,7 +25,8 @@ import aiohttp
 
 from create_bot import db, env_config, superusers
 from models import UserMessageCount
-from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models, should_use_smaller_model, predict_processing_time
+from audio_utils import transcribe_with_whisper, convert_audio_format, list_downloaded_models, should_use_smaller_model, \
+    predict_processing_time, should_condition_on_previous_text
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -1010,7 +1011,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
             os.remove(destination)
         return False
 
-async def transcribe_audio(file_path, should_switch = False, use_local_whisper=USE_LOCAL_WHISPER):
+async def transcribe_audio(file_path, condition_on_previous_text = False, use_local_whisper=USE_LOCAL_WHISPER):
     """Транскрибация аудио с использованием OpenAI API или локальной модели Whisper"""
     try:
         if use_local_whisper:
@@ -1021,7 +1022,7 @@ async def transcribe_audio(file_path, should_switch = False, use_local_whisper=U
             transcription = await transcribe_with_whisper(
                 converted_file, 
                 model_name=WHISPER_MODEL,
-                condition_on_previous_text=should_switch
+                condition_on_previous_text=condition_on_previous_text
             )
             
             # Удаляем конвертированный файл если он отличается от оригинала
@@ -1214,7 +1215,7 @@ async def background_audio_processor():
                         should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
                         
                         if should_switch:
-                            await processing_msg.edit_text(
+                            await bot.send_message(processing_msg.chat.id,
                                 f"Транскрибирую аудио...\n\n"
                                 f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
                                 f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
@@ -1230,7 +1231,7 @@ async def background_audio_processor():
                         future = loop.run_in_executor(
                             thread_executor,
                             # Оборачиваем асинхронную функцию в синхронную
-                            lambda fp=file_path: asyncio.run(transcribe_audio(fp, should_switch))
+                            lambda fp=file_path: asyncio.run(transcribe_audio(fp, should_condition_on_previous_text(file_size_mb)))
                         )
                         
                         # Сохраняем информацию о текущей задаче в словаре активных задач

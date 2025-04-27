@@ -656,7 +656,7 @@ def should_use_smaller_model(file_size_mb, model_name):
     heavy_models = ["medium", "large", "large-v2", "large-v3", "turbo"]
     
     # Пороги размера файла для переключения на модель меньшего размера
-    file_size_threshold = 10  # МБ
+    file_size_threshold = 20  # МБ
     
     # Проверяем, нужно ли переключаться на меньшую модель
     if file_size_mb > file_size_threshold and model_name in heavy_models:
@@ -664,7 +664,26 @@ def should_use_smaller_model(file_size_mb, model_name):
         return True, "small"
     
     # Модель менять не нужно
-    return False, model_name 
+    return False, model_name
+
+def should_condition_on_previous_text(file_size_mb):
+    """
+    Определяет, требуется ли переключение на condition_on_previous_text
+    для данного размера файла.
+
+    Args:
+        file_size_mb: Размер файла в МБ
+
+    Returns:
+        bool: нужно ли менять condition_on_previous_text
+    """
+    # Пороги размера файла для переключения
+    file_size_threshold = 2  # МБ
+
+    # Проверяем, нужно ли переключаться на меньшую модель
+    if file_size_mb > file_size_threshold:
+        return True
+    return False
 
 def predict_processing_time(file_path, model_name):
     """
