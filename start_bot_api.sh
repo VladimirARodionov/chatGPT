@@ -65,4 +65,4 @@ else
 fi
 
 # Запуск отфильтрованного вывода логов - исключаем строки с "CPU usage"
-tail -f /var/log/telegram-bot-api/bot-api.log | grep -v "CPU usage"
+tail -f /var/log/telegram-bot-api/bot-api.log
