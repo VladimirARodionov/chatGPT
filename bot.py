@@ -986,15 +986,70 @@ async def transcribe_audio(file_path, use_local_whisper=USE_LOCAL_WHISPER):
         logger.exception(f"Ошибка при транскрибации: {e}")
         raise
 
+# Функция для очистки временных файлов
+def cleanup_temp_files(file_path=None, older_than_hours=24):
+    """
+    Удаляет временные файлы после обработки аудио
+    
+    Args:
+        file_path: Конкретный файл для удаления (если указан)
+        older_than_hours: Удалить все файлы старше указанного количества часов
+    """
+    try:
+        # Если указан конкретный файл, удаляем его
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"Удален временный файл: {file_path}")
+            return
+            
+        # Если файл не указан, очищаем старые файлы
+        if not os.path.exists(TEMP_AUDIO_DIR):
+            return
+            
+        current_time = datetime.now()
+        count_removed = 0
+        
+        for filename in os.listdir(TEMP_AUDIO_DIR):
+            file_path = os.path.join(TEMP_AUDIO_DIR, filename)
+            
+            # Проверяем, что это файл, а не директория
+            if os.path.isfile(file_path):
+                # Получаем время последнего изменения файла
+                file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                # Вычисляем, сколько часов прошло
+                age_hours = (current_time - file_mod_time).total_seconds() / 3600
+                
+                # Если файл старше указанного времени, удаляем его
+                if age_hours > older_than_hours:
+                    os.remove(file_path)
+                    count_removed += 1
+                    
+        if count_removed > 0:
+            logger.info(f"Очищено {count_removed} временных файлов старше {older_than_hours} часов")
+    except Exception as e:
+        logger.exception(f"Ошибка при очистке временных файлов: {e}")
+
 async def background_audio_processor():
     """Фоновый обработчик очереди аудиофайлов"""
     global background_worker_running
     background_worker_running = True
     logger.info("Запущен фоновый обработчик аудиофайлов")
     
+    # Счетчик для периодической очистки файлов
+    cleanup_counter = 0
+    
     try:
         while True:
             try:
+                # Инкрементируем счетчик очистки
+                cleanup_counter += 1
+                
+                # Каждые 10 циклов выполняем очистку старых файлов
+                if cleanup_counter >= 10:
+                    cleanup_counter = 0
+                    logger.debug("Запуск периодической очистки временных файлов")
+                    cleanup_temp_files(older_than_hours=24)
+                
                 # Получаем задачу из очереди (с таймаутом, чтобы можно было корректно завершить поток)
                 task = await asyncio.wait_for(audio_task_queue.get(), timeout=1.0)
                 
@@ -1013,8 +1068,7 @@ async def background_audio_processor():
                         
                         # Удаляем временные файлы
                         try:
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
+                            cleanup_temp_files(file_path)
                         except Exception as e:
                             logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
                         
@@ -1077,8 +1131,7 @@ async def background_audio_processor():
                                     
                                     # Удаляем временные файлы
                                     try:
-                                        if os.path.exists(file_path):
-                                            os.remove(file_path)
+                                        cleanup_temp_files(file_path)
                                     except Exception as e:
                                         logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
                                     
@@ -1163,7 +1216,7 @@ async def background_audio_processor():
                         
                         # Удаляем временные файлы
                         try:
-                            os.remove(file_path)
+                            cleanup_temp_files(file_path)
                         except Exception as e:
                             logger.exception(f"Ошибка при удалении временных файлов: {e}")
                         
@@ -1220,7 +1273,7 @@ async def background_audio_processor():
                         
                         # Удаляем временные файлы
                         try:
-                            os.remove(file_path)
+                            cleanup_temp_files(file_path)
                         except Exception as e:
                             logger.exception(f"Ошибка при удалении временных файлов: {e}")
                         
@@ -1272,7 +1325,7 @@ async def background_audio_processor():
                     
                     # Удаляем временные файлы
                     try:
-                        os.remove(file_path)
+                        cleanup_temp_files(file_path)
                     except Exception as e:
                         logger.exception(f"Ошибка при удалении временных файлов: {e}")
                     
@@ -1336,6 +1389,14 @@ async def cmd_cancel(message: types.Message):
                 )
             except Exception as e:
                 logger.exception(f"Ошибка при обновлении сообщения об отмене: {e}")
+            
+            # Удаляем временный файл
+            if file_path and os.path.exists(file_path):
+                try:
+                    cleanup_temp_files(file_path)
+                    logger.info(f"Временный файл {file_path} был удален при отмене задачи пользователем {user_id}")
+                except Exception as e:
+                    logger.exception(f"Ошибка при удалении временного файла при отмене: {e}")
             
             await message.answer("✅ Задача обработки аудио отменена.")
             logger.info(f"Пользователь {user_id} отменил обработку аудио")
@@ -1616,6 +1677,10 @@ async def main():
     try:
         logger.info(f'Используемая модель Whisper: {WHISPER_MODEL}')
         logger.info(f'Директория для моделей Whisper: {WHISPER_MODELS_DIR}')
+        
+        # Очищаем старые временные файлы при запуске
+        cleanup_temp_files(older_than_hours=24)
+        logger.info('Выполнена очистка старых временных файлов')
         
         # Запускаем фоновый обработчик очереди
         background_task = asyncio.create_task(background_audio_processor())
