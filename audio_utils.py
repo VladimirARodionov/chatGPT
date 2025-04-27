@@ -176,28 +176,71 @@ def list_downloaded_models():
 
 async def transcribe_with_whisper(file_path, language=None, model_name="small"):
     """
-    Транскрибирует аудио файл с помощью модели Whisper.
+    Транскрибирует аудиофайл с помощью модели Whisper.
     
     Args:
-        file_path: Путь к аудио файлу
-        language: Код языка (если None, Whisper попытается определить язык)
-        model_name: Имя модели Whisper для использования
+        file_path: Путь к аудиофайлу
+        language: Код языка (опционально)
+        model_name: Название модели Whisper
         
     Returns:
-        Словарь с результатами транскрипции или None в случае ошибки
+        Результат транскрибации (словарь с текстом и метаданными) или None в случае ошибки
     """
     try:
         start_time = time.time()
-        logger.info(f"Начата транскрипция файла: {file_path}")
+        logger.info(f"Начинаем транскрибацию файла {file_path} с использованием модели {model_name}")
         
         # Проверяем существование файла
-        if not os.path.exists(file_path):
+        if not os.path.isfile(file_path):
             logger.error(f"Файл не найден: {file_path}")
             return None
             
         # Проверяем размер файла
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        if file_size == 0:
+            logger.error(f"Файл пуст: {file_path}")
+            return None
+            
         logger.info(f"Размер файла: {file_size_mb:.2f} МБ")
+        
+        # Проверка валидности аудиофайла и получение его длительности
+        audio_duration = 0
+        try:
+            # Используем ffprobe для проверки файла и получения длительности
+            ffprobe_result = subprocess.run(
+                [
+                    "ffprobe", 
+                    "-v", "error", 
+                    "-show_entries", "format=duration", 
+                    "-of", "json", 
+                    file_path
+                ],
+                capture_output=True,
+                text=True,
+                check=False  # Не выбрасываем исключение при ненулевом коде возврата
+            )
+            
+            # Проверяем, успешно ли выполнилась команда
+            if ffprobe_result.returncode == 0:
+                try:
+                    output = json.loads(ffprobe_result.stdout)
+                    if "format" in output and "duration" in output["format"]:
+                        audio_duration = float(output["format"]["duration"])
+                        logger.info(f"Определена длительность аудио: {audio_duration:.2f} сек")
+                        
+                        # Проверяем очень короткие файлы
+                        if audio_duration < 0.5:
+                            logger.warning(f"Очень короткий аудиофайл ({audio_duration:.2f} сек), возможны проблемы с транскрибацией")
+                    else:
+                        logger.warning("ffprobe не вернул информацию о длительности")
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Ошибка при парсинге вывода ffprobe: {e}")
+            else:
+                logger.warning(f"ffprobe вернул ошибку: {ffprobe_result.stderr}")
+                logger.warning("Файл может не быть валидным аудиофайлом или иметь неподдерживаемый формат")
+        except Exception as e:
+            logger.warning(f"Ошибка при проверке аудиофайла: {e}")
         
         # Дополнительная проверка файла
         try:
@@ -209,10 +252,20 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
                         rate = wave_file.getframerate()
                         duration = frames / float(rate)
                         logger.info(f"WAV файл: {frames} фреймов, {rate} Гц, длительность: {duration:.2f} сек")
+                        
+                        # Если ffprobe не определил длительность, используем информацию из wave
+                        if audio_duration == 0:
+                            audio_duration = duration
                 except Exception as wave_error:
                     logger.warning(f"Не удалось прочитать WAV файл: {wave_error}")
         except ImportError:
             logger.warning("Модуль wave не установлен, пропускаем дополнительную проверку WAV")
+        
+        # Если длительность не удалось определить, оцениваем по размеру файла
+        if audio_duration == 0:
+            estimated_duration = file_size_mb * 60  # Приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
+            logger.info(f"Используем оценочную длительность на основе размера файла: {estimated_duration:.2f} сек")
+            audio_duration = estimated_duration
             
         # Загружаем модель
         try:
@@ -314,6 +367,49 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small"):
             # Засекаем время выполнения
             elapsed_time = time.time() - start_time
             audio_duration = result.get("duration", 0)
+            
+            # Проверяем, если длительность аудио равна 0, попробуем получить её через ffprobe
+            if audio_duration == 0:
+                logger.warning("Whisper вернул нулевую длительность аудио, пробуем получить длительность через ffprobe")
+                try:
+                    # Выполняем команду ffprobe для получения информации о длительности
+                    ffprobe_result = subprocess.run(
+                        [
+                            "ffprobe", 
+                            "-v", "error", 
+                            "-show_entries", "format=duration", 
+                            "-of", "json", 
+                            file_path
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    
+                    # Парсим результат
+                    if ffprobe_result.returncode == 0:
+                        output = json.loads(ffprobe_result.stdout)
+                        audio_duration = float(output["format"]["duration"])
+                        logger.info(f"Получена длительность через ffprobe: {audio_duration:.2f} сек")
+                        
+                        # Обновляем результат с правильной длительностью
+                        result["duration"] = audio_duration
+                    else:
+                        logger.warning(f"Не удалось получить длительность через ffprobe. Код возврата: {ffprobe_result.returncode}")
+                except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError) as e:
+                    logger.warning(f"Ошибка при получении длительности через ffprobe: {e}")
+                except Exception as e:
+                    logger.warning(f"Непредвиденная ошибка при получении длительности: {e}")
+                
+                # Если все методы определения длительности не сработали, оцениваем по размеру файла
+                if audio_duration == 0:
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    # Приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
+                    estimated_duration = file_size_mb * 60
+                    logger.info(f"Используем оценочную длительность на основе размера файла: {estimated_duration:.2f} сек")
+                    audio_duration = estimated_duration
+                    result["duration"] = audio_duration
+            
             ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
             
             # Добавляем информацию о том, что модель была переключена

@@ -463,6 +463,65 @@ async def cmd_models(message: types.Message):
         logger.exception(f"Ошибка при получении списка моделей: {e}")
         await message.answer(f"Произошла ошибка при получении списка моделей: {str(e)}")
 
+@dp.message(Command("queue"))
+async def cmd_queue(message: types.Message):
+    """Отображает текущую очередь задач на обработку аудио"""
+    user_id = message.from_user.id
+
+    # Проверяем, является ли пользователь администратором
+    #if user_id not in superusers:
+    #    await message.answer("⚠️ У вас нет прав для просмотра очереди задач.")
+    #queue    return
+
+    # Получаем текущую очередь задач
+    queue_size = audio_task_queue.qsize()
+
+    if queue_size == 0 and not active_transcriptions:
+        await message.answer("🟢 Очередь пуста. Нет активных задач на обработке.")
+        return
+
+    # Формируем информацию о текущей очереди
+    queue_info = f"📋 <b>Статус очереди обработки аудио:</b>\n\n"
+
+    # Информация об активных задачах транскрибации
+    if active_transcriptions:
+        queue_info += f"🔄 <b>Активные задачи ({len(active_transcriptions)}):</b>\n"
+        for user_id, (future, message_id, file_path) in active_transcriptions.items():
+            if future == "cancelled":
+                status = "⏹ Отменяется"
+            else:
+                status = "▶️ Обрабатывается"
+
+            file_name = os.path.basename(file_path)
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
+
+            queue_info += f"- Пользователь: <code>{user_id}</code>, {status}\n"
+            queue_info += f"  Файл: {file_name} ({file_size_mb:.2f} МБ)\n"
+
+        queue_info += "\n"
+
+    # Получаем задачи из очереди (не удаляя их)
+    if queue_size > 0:
+        queue_info += f"⏳ <b>В очереди ожидания ({queue_size}):</b>\n"
+
+        # Нельзя напрямую перебрать асинхронную очередь, создадим временный список для отображения
+        queue_list = []
+        unfinished = audio_task_queue._unfinished_tasks
+
+        # Если есть задачи, указываем их количество
+        if unfinished > 0:
+            queue_info += f"- Количество задач в очереди: {unfinished}\n"
+        else:
+            queue_info += "- Очередь пуста или невозможно получить детальную информацию\n"
+
+    # Добавляем информацию о состоянии фоновых процессов
+    queue_info += f"\n🖥 <b>Системная информация:</b>\n"
+    queue_info += f"- Фоновый обработчик: {'Работает' if background_worker_running else 'Остановлен'}\n"
+    queue_info += f"- Рабочих потоков: {thread_executor._max_workers}\n"
+
+    # Отправляем информацию
+    await message.answer(queue_info, parse_mode="HTML")
+
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = """
@@ -1551,64 +1610,6 @@ async def handle_message(message: types.Message):
         logger.exception(f"Произошла ошибка при обработке сообщения: {e}")
         await processing_msg.edit_text(f"Произошла ошибка при обработке сообщения: {str(e)}")
 
-@dp.message(Command("queue"))
-async def cmd_queue(message: types.Message):
-    """Отображает текущую очередь задач на обработку аудио"""
-    user_id = message.from_user.id
-    
-    # Проверяем, является ли пользователь администратором
-    #if user_id not in superusers:
-    #    await message.answer("⚠️ У вас нет прав для просмотра очереди задач.")
-    #queue    return
-    
-    # Получаем текущую очередь задач
-    queue_size = audio_task_queue.qsize()
-    
-    if queue_size == 0 and not active_transcriptions:
-        await message.answer("🟢 Очередь пуста. Нет активных задач на обработке.")
-        return
-    
-    # Формируем информацию о текущей очереди
-    queue_info = f"📋 <b>Статус очереди обработки аудио:</b>\n\n"
-    
-    # Информация об активных задачах транскрибации
-    if active_transcriptions:
-        queue_info += f"🔄 <b>Активные задачи ({len(active_transcriptions)}):</b>\n"
-        for user_id, (future, message_id, file_path) in active_transcriptions.items():
-            if future == "cancelled":
-                status = "⏹ Отменяется"
-            else:
-                status = "▶️ Обрабатывается"
-            
-            file_name = os.path.basename(file_path)
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
-            
-            queue_info += f"- Пользователь: <code>{user_id}</code>, {status}\n"
-            queue_info += f"  Файл: {file_name} ({file_size_mb:.2f} МБ)\n"
-        
-        queue_info += "\n"
-    
-    # Получаем задачи из очереди (не удаляя их)
-    if queue_size > 0:
-        queue_info += f"⏳ <b>В очереди ожидания ({queue_size}):</b>\n"
-        
-        # Нельзя напрямую перебрать асинхронную очередь, создадим временный список для отображения
-        queue_list = []
-        unfinished = audio_task_queue._unfinished_tasks
-        
-        # Если есть задачи, указываем их количество
-        if unfinished > 0:
-            queue_info += f"- Количество задач в очереди: {unfinished}\n"
-        else:
-            queue_info += "- Очередь пуста или невозможно получить детальную информацию\n"
-    
-    # Добавляем информацию о состоянии фоновых процессов
-    queue_info += f"\n🖥 <b>Системная информация:</b>\n"
-    queue_info += f"- Фоновый обработчик: {'Работает' if background_worker_running else 'Остановлен'}\n"
-    queue_info += f"- Рабочих потоков: {thread_executor._max_workers}\n"
-    
-    # Отправляем информацию
-    await message.answer(queue_info, parse_mode="HTML")
 
 async def main():
     logger.info('Бот запущен.')
