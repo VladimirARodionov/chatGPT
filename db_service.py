@@ -144,3 +144,39 @@ def get_all_from_queue():
             TranscribeQueue.cancelled == False
         ).order_by(TranscribeQueue.id.asc()).all()
         return all_from_queue
+
+def reset_active_tasks():
+    """
+    Сбрасывает флаг is_active у всех активных задач.
+    Используется при перезапуске приложения, чтобы вернуть активные задачи в очередь.
+    """
+    with get_db_session() as session:
+        # Находим все активные задачи, которые не помечены как завершенные или отмененные
+        active_tasks = session.query(TranscribeQueue).filter(
+            TranscribeQueue.is_active == True,
+            TranscribeQueue.finished == False, 
+            TranscribeQueue.cancelled == False
+        ).all()
+        
+        # Сбрасываем флаг активности
+        for task in active_tasks:
+            task.is_active = False
+            session.add(task)
+        
+        # Сохраняем изменения
+        session.commit()
+        
+        # Возвращаем количество сброшенных задач
+        return len(active_tasks)
+
+def get_active_tasks():
+    """
+    Возвращает все активные задачи, которые не помечены как завершенные или отмененные.
+    """
+    with get_db_session() as session:
+        active_tasks = session.query(TranscribeQueue).filter(
+            TranscribeQueue.is_active == True,
+            TranscribeQueue.finished == False,
+            TranscribeQueue.cancelled == False
+        ).order_by(TranscribeQueue.id.asc()).all()
+        return active_tasks

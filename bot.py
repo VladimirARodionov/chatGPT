@@ -15,7 +15,7 @@ from audio_service import background_worker_running, thread_executor, async_canc
     background_audio_processor, init_monitoring
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
     USE_LOCAL_WHISPER
-from db_service import get_cmd_status, check_message_limit, get_all_from_queue
+from db_service import get_cmd_status, check_message_limit, get_all_from_queue, reset_active_tasks
 from files_service import cleanup_temp_files, split_text_into_chunks
 from audio_utils import list_downloaded_models
 
@@ -284,6 +284,11 @@ async def main():
     try:
         logger.info(f'Используемая модель Whisper: {WHISPER_MODEL}')
         logger.info(f'Директория для моделей Whisper: {WHISPER_MODELS_DIR}')
+        
+        # Сбрасываем активные задачи из предыдущего запуска
+        reset_count = reset_active_tasks()
+        if reset_count > 0:
+            logger.info(f'Сброшено {reset_count} активных задач из предыдущего запуска')
         
         # Очищаем старые временные файлы при запуске
         cleanup_temp_files(older_than_hours=24)

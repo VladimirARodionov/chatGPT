@@ -13,7 +13,7 @@ from audio_utils import predict_processing_time, should_use_smaller_model, conve
 from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, \
     LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT
 from db_service import check_message_limit, get_queue, add_to_queue, set_active_queue, set_finished_queue, \
-    set_cancelled_queue, get_db_session, get_first_from_queue
+    set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks
 from files_service import cleanup_temp_files, save_transcription_to_file, download_voice, \
     get_file_path_direct, download_large_file_direct, send_file_safely
 from models import TranscribeQueue
@@ -313,6 +313,15 @@ async def background_audio_processor():
     error_counter = 0
     # Максимальное количество последовательных ошибок перед небольшим ожиданием
     MAX_CONSECUTIVE_ERRORS = 5
+
+    # Первым делом проверяем, есть ли активные задачи, которые были при перезапуске
+    # Это нужно для того, чтобы возобновить обработку задач после перезагрузки сервера
+    active_tasks = get_active_tasks()
+    if active_tasks:
+        logger.info(f"Обнаружено {len(active_tasks)} активных задач после перезапуска. Продолжаем их обработку.")
+        
+        # Сбрасываем флаг активности у всех активных задач, чтобы они были обработаны в правильном порядке
+        reset_active_tasks()
 
     try:
         while True:
