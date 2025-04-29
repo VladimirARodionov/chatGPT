@@ -25,6 +25,16 @@ thread_executor = ThreadPoolExecutor(max_workers=3)
 
 # Флаг для отслеживания статуса обработчика очереди
 background_worker_running = False
+# Хранение ссылки на задачу фонового обработчика
+background_worker_task = None
+# Флаг для автоматического перезапуска обработчика
+AUTO_RESTART_PROCESSOR = True
+# Максимальное количество последовательных перезапусков
+MAX_AUTO_RESTARTS = 5
+# Счетчик перезапусков
+auto_restart_counter = 0
+# Время последнего перезапуска
+last_restart_time = None
 
 
 async def handle_audio_service(message: Message):
@@ -177,11 +187,7 @@ async def handle_audio_service(message: Message):
             estimated_time_str = str(estimated_time)
 
         # Запускаем фоновый обработчик очереди, если он еще не запущен
-        global background_worker_running
-        if not background_worker_running:
-            # Создаем и запускаем задачу, не ожидая ее завершения
-            background_task = asyncio.create_task(background_audio_processor())
-            # Мы не используем await, так как не хотим блокировать выполнение текущего кода
+        await ensure_background_processor_running()
 
         # Добавляем задачу в базу данных
         add_to_queue(user_id, file_path, file_name, file_size_mb, processing_msg.message_id, message.chat.id)
@@ -245,7 +251,17 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
     try:
         if use_local_whisper:
             # Конвертируем в нужный формат для Whisper если нужно
-            converted_file = await convert_audio_format(file_path)
+            try:
+                converted_file = await convert_audio_format(file_path)
+            except Exception as conv_error:
+                logger.error(f"Ошибка при конвертации аудиофайла: {conv_error}")
+                # Пробуем использовать оригинальный файл если конвертация не удалась
+                converted_file = file_path
+
+            # Проверяем, существует ли файл и не пустой ли он
+            if not os.path.exists(converted_file) or os.path.getsize(converted_file) == 0:
+                logger.error(f"Файл не существует или пуст после конвертации: {converted_file}")
+                raise FileNotFoundError(f"Файл не существует или пуст: {converted_file}")
 
             # Используем локальную модель Whisper
             transcription = await transcribe_with_whisper(
@@ -282,11 +298,21 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
 async def background_audio_processor():
     """Фоновый обработчик очереди аудиофайлов из базы данных"""
     global background_worker_running
+    
+    # Защита от параллельного запуска нескольких обработчиков
+    if background_worker_running:
+        logger.warning("Попытка запустить фоновый обработчик, когда он уже запущен")
+        return
+        
     background_worker_running = True
     logger.info("Запущен фоновый обработчик аудиофайлов")
 
     # Счетчик для периодической очистки файлов
     cleanup_counter = 0
+    # Счетчик для отслеживания последовательных ошибок
+    error_counter = 0
+    # Максимальное количество последовательных ошибок перед небольшим ожиданием
+    MAX_CONSECUTIVE_ERRORS = 5
 
     try:
         while True:
@@ -304,7 +330,23 @@ async def background_audio_processor():
                 active_task = None
                 
                 # Получим первую задачу из базы
-                active_task = get_first_from_queue()
+                try:
+                    active_task = get_first_from_queue()
+                    # Если задача успешно получена, сбрасываем счетчик ошибок
+                    error_counter = 0
+                except Exception as db_error:
+                    logger.error(f"Ошибка при получении задачи из базы данных: {db_error}")
+                    error_counter += 1
+                    
+                    # Если слишком много последовательных ошибок, делаем небольшую паузу
+                    if error_counter >= MAX_CONSECUTIVE_ERRORS:
+                        logger.warning(f"Обнаружено {error_counter} последовательных ошибок. Делаем паузу перед следующей попыткой.")
+                        await asyncio.sleep(10)  # Пауза на 10 секунд
+                        error_counter = 0  # Сбрасываем счетчик после паузы
+                    
+                    await asyncio.sleep(1)
+                    continue
+                
                 # Если нет задач, ждем 1 секунду и проверяем снова
                 if not active_task:
                     await asyncio.sleep(1)
@@ -368,6 +410,13 @@ async def background_audio_processor():
                 # Запускаем транскрибацию в отдельном потоке, чтобы не блокировать event loop
                 loop = asyncio.get_event_loop()
                 try:
+                    # Перед созданием future, убедимся, что файл существует
+                    if not os.path.exists(file_path):
+                        logger.error(f"Файл не существует перед запуском транскрибации: {file_path}")
+                        await processing_msg.edit_text(f"❌ Ошибка: Файл для транскрибации не найден.")
+                        set_finished_queue(active_task.id)
+                        continue
+                        
                     # Создаем объект будущего результата
                     future = loop.run_in_executor(
                         thread_executor,
@@ -446,7 +495,18 @@ async def background_audio_processor():
                         continue
 
                     # Получаем результат
-                    transcription = await future
+                    try:
+                        transcription = await future
+                    except asyncio.CancelledError:
+                        logger.info(f"Транскрибация для пользователя {user_id} отменена")
+                        await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                        set_cancelled_queue(active_task.id)
+                        continue
+                    except Exception as transcribe_error:
+                        logger.exception(f"Ошибка при получении результата транскрибации: {transcribe_error}")
+                        await processing_msg.edit_text(f"❌ Произошла ошибка при транскрибации: {str(transcribe_error)}")
+                        set_finished_queue(active_task.id)
+                        continue
 
                 except Exception as e:
                     logger.exception(f"Ошибка при асинхронной транскрибации: {e}")
@@ -617,12 +677,32 @@ async def background_audio_processor():
                 continue
             except asyncio.CancelledError:
                 # Обработчик был остановлен
-                logger.info("Фоновый обработчик аудиофайлов остановлен")
+                logger.info("Фоновый обработчик аудиофайлов остановлен по запросу отмены")
                 break
             except Exception as e:
                 logger.exception(f"Неожиданная ошибка в обработчике очереди: {e}")
-                # Продолжаем работу, несмотря на ошибку
-                await asyncio.sleep(1)
+                # Добавляем дополнительный лог для мониторинга более серьезных проблем
+                logger.error(f"Обработчик продолжит работу несмотря на ошибку: {str(e)}")
+                # Увеличиваем счетчик ошибок
+                error_counter += 1
+                
+                # Если много последовательных ошибок, делаем более длинную паузу
+                if error_counter >= MAX_CONSECUTIVE_ERRORS:
+                    logger.warning(f"Слишком много ошибок подряд ({error_counter}). Делаем паузу для стабилизации.")
+                    await asyncio.sleep(30)  # Пауза на 30 секунд после серии ошибок
+                    error_counter = 0
+                else:
+                    # Небольшая пауза после ошибки
+                    await asyncio.sleep(1)
+            
+            # Периодически логируем состояние обработчика для мониторинга
+            if cleanup_counter % 50 == 0:
+                logger.info(f"Фоновый обработчик продолжает работать. Счетчик очистки: {cleanup_counter}")
+                
+    except Exception as e:
+        # Логируем любые непредвиденные ошибки вне внутреннего try-except блока
+        logger.exception(f"Критическая ошибка в фоновом обработчике: {e}")
+        raise  # Пробрасываем ошибку, чтобы она была видна в .done() проверке
     finally:
         background_worker_running = False
         logger.info("Фоновый обработчик аудиофайлов завершен")
@@ -655,6 +735,9 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
         else:
             logger.warning(f"Не удалось отменить задачу {task.id} для пользователя {user_id}")
     
+    # Запускаем асинхронную проверку состояния обработчика
+    asyncio.create_task(ensure_background_processor_running())
+    
     if cancelled_count > 0:
         # Формируем текст в зависимости от количества отмененных задач
         task_text = "задача" if cancelled_count == 1 else "задачи"
@@ -664,3 +747,88 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
         return True, f"✅ {cancelled_count} {task_text} на транскрибацию отменено."
     else:
         return False, "Не удалось отменить задачи на транскрибацию."
+
+async def ensure_background_processor_running():
+    """
+    Функция для проверки и запуска фонового обработчика, если он остановлен
+    """
+    global background_worker_running, background_worker_task, auto_restart_counter, last_restart_time
+    
+    # Проверяем, нужно ли перезапускать обработчик
+    restart_needed = False
+    
+    # Если нет активного экземпляра задачи
+    if not background_worker_task:
+        logger.warning("Фоновый обработчик не запущен (background_worker_task is None). Запускаем.")
+        restart_needed = True
+    # Если задача завершена или отменена
+    elif background_worker_task.done() or background_worker_task.cancelled():
+        logger.warning(f"Фоновый обработчик не активен (done={background_worker_task.done()}, cancelled={background_worker_task.cancelled()}). Перезапускаем.")
+        restart_needed = True
+        # Проверяем наличие исключений
+        if background_worker_task.done() and not background_worker_task.cancelled():
+            try:
+                # Извлекаем результат для проверки на исключения
+                background_worker_task.result()
+                logger.info("Фоновый обработчик завершился без ошибок.")
+            except Exception as e:
+                logger.error(f"Фоновый обработчик завершился с ошибкой: {e}")
+    
+    # Если флаг указывает, что обработчик запущен, но задача требует перезапуска,
+    # обновляем флаг для отражения реального состояния
+    if background_worker_running and restart_needed:
+        logger.warning("Обнаружено несоответствие: флаг background_worker_running=True, но задача не активна")
+        background_worker_running = False
+    
+    # Перезапускаем обработчик, если необходимо
+    if restart_needed:
+        # Проверяем, не превышен ли лимит автоматических перезапусков
+        current_time = datetime.now()
+        
+        # Если есть запись о предыдущем перезапуске
+        if last_restart_time:
+            # Если с момента последнего перезапуска прошло более 1 часа, сбрасываем счетчик
+            if (current_time - last_restart_time).total_seconds() > 3600:
+                auto_restart_counter = 0
+            # Если было слишком много перезапусков за короткий период и автоперезапуск включен
+            elif auto_restart_counter >= MAX_AUTO_RESTARTS and AUTO_RESTART_PROCESSOR:
+                logger.error(f"Превышено максимальное количество перезапусков ({MAX_AUTO_RESTARTS}). Временно отключаем автоперезапуск.")
+                # Ждем 5 минут перед сбросом счетчика
+                await asyncio.sleep(300)
+                auto_restart_counter = 0
+        
+        # Обновляем время последнего перезапуска
+        last_restart_time = current_time
+        auto_restart_counter += 1
+        
+        # Запускаем обработчик
+        background_worker_task = asyncio.create_task(background_audio_processor())
+        logger.info(f"Фоновый обработчик перезапущен (перезапуск #{auto_restart_counter})")
+    
+    return restart_needed
+
+# Периодическая проверка состояния обработчика
+async def monitor_background_processor():
+    """
+    Периодически проверяет состояние фонового обработчика и перезапускает его при необходимости
+    """
+    while True:
+        try:
+            # Проверяем и перезапускаем обработчик, если необходимо
+            await ensure_background_processor_running()
+        except Exception as e:
+            logger.exception(f"Ошибка в мониторинге фонового обработчика: {e}")
+        
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
+
+# Запускаем мониторинг при старте приложения
+def start_background_monitoring():
+    """
+    Запускает мониторинг фонового обработчика при старте приложения
+    """
+    asyncio.create_task(monitor_background_processor())
+    logger.info("Запущен мониторинг фонового обработчика")
+
+# Вызываем функцию при импорте модуля
+start_background_monitoring()
