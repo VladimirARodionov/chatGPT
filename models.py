@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Date, BigInteger, DateTime, String, Boolean, func
+from sqlalchemy import Column, Integer, Date, BigInteger, DateTime, String, Boolean, func, Numeric, Float
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 from dotenv import load_dotenv
@@ -23,7 +23,7 @@ class TranscribeQueue(Base):
     user_id = Column(BigInteger, nullable=False)
     file_path = Column(String, nullable=False)
     file_name = Column(String, nullable=False)
-    file_size_mb = Column(Integer)
+    file_size_mb = Column(Float)
     message_id = Column(BigInteger, nullable=False)
     chat_id = Column(BigInteger, nullable=False)
     is_active = Column(Boolean, default=True)

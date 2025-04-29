@@ -77,7 +77,7 @@ def get_queue(user_id: int):
                                               TranscribeQueue.cancelled == False).order_by(TranscribeQueue.id.asc()).all()
         return result
 
-def add_to_queue(user_id: int, file_path: str, file_name: str, file_size_mb:int, message_id: int, chat_id: int):
+def add_to_queue(user_id: int, file_path: str, file_name: str, file_size_mb:float, message_id: int, chat_id: int):
     with get_db_session() as session:
         item = TranscribeQueue(user_id=user_id,
                                file_path=file_path,
