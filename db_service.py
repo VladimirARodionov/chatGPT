@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from create_bot import db
-from models import UserMessageCount
+from models import UserMessageCount, TranscribeQueue
 
 logger = logging.getLogger(__name__)
 
@@ -68,3 +68,79 @@ async def get_cmd_status(message: Message):
         else:
             remaining = max(0, 50 - result.count)
             await message.answer(f"Сегодня вы отправили {result.count} сообщений. Осталось сообщений: {remaining}.")
+
+
+def get_queue(user_id: int):
+    with get_db_session() as session:
+        result = session.query(TranscribeQueue).where(TranscribeQueue.user_id == user_id,
+                                              TranscribeQueue.finished == False,
+                                              TranscribeQueue.cancelled == False).order_by(TranscribeQueue.id.asc()).all()
+        return result
+
+def add_to_queue(user_id: int, file_path: str, file_name: str, file_size_mb:int, message_id: int, chat_id: int):
+    with get_db_session() as session:
+        item = TranscribeQueue(user_id=user_id,
+                               file_path=file_path,
+                               file_name=file_name,
+                               file_size_mb=file_size_mb,
+                               message_id=message_id,
+                               chat_id=chat_id,
+                               is_active=False,
+                               finished=False,
+                               cancelled=False)
+        session.add(item)
+        session.commit()
+
+def set_active_queue(id: int):
+    with get_db_session() as session:
+        item = session.query(TranscribeQueue).where(TranscribeQueue.id == id).first()
+        if item:
+            item.is_active = True
+            session.add(item)
+            session.commit()
+            return True
+        else:
+            return False
+
+
+def set_finished_queue(id: int):
+    with get_db_session() as session:
+        item = session.query(TranscribeQueue).where(TranscribeQueue.id == id).first()
+        if item:
+            item.is_active = False
+            item.finished = True
+            session.add(item)
+            session.commit()
+            return True
+        else:
+            return False
+
+
+def set_cancelled_queue(id: int):
+    with get_db_session() as session:
+        item = session.query(TranscribeQueue).where(TranscribeQueue.id == id).first()
+        if item:
+            item.is_active = False
+            item.cancelled = True
+            session.add(item)
+            session.commit()
+            return True
+        else:
+            return False
+
+def get_first_from_queue():
+    with get_db_session() as session:
+        first_item = session.query(TranscribeQueue).filter(
+            TranscribeQueue.finished == False,
+            TranscribeQueue.cancelled == False,
+            TranscribeQueue.is_active == False
+        ).order_by(TranscribeQueue.id.asc()).first()
+        return first_item
+
+def get_all_from_queue():
+    with get_db_session() as session:
+        all_from_queue = session.query(TranscribeQueue).filter(
+            TranscribeQueue.finished == False,
+            TranscribeQueue.cancelled == False
+        ).order_by(TranscribeQueue.id.asc()).all()
+        return all_from_queue
