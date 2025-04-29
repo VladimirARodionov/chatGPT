@@ -11,9 +11,9 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove
 from openai import OpenAI
 
-from audio_service import background_worker_running, thread_executor, \
+from audio_service import thread_executor, \
     handle_audio_service, \
-    background_audio_processor, init_monitoring, cancel_audio_processing
+    init_monitoring, cancel_audio_processing, background_processor
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
     USE_LOCAL_WHISPER
 from db_service import get_cmd_status, check_message_limit, get_all_from_queue, reset_active_tasks
@@ -149,10 +149,46 @@ async def cmd_queue(message: types.Message):
 
             queue_info += f"{i}. Пользователь: <code>{task.user_id}</code>{" (Я)" if user_id == task.user_id else ""}, Файл: {file_name} ({task.file_size_mb:.2f} МБ)\n"
 
+    # Получаем состояние фонового обработчика
+    from audio_service import background_worker_task, ensure_background_processor_running
+    
+    # Проверяем состояние задачи фонового обработчика
+    processor_status = "🔴 Остановлен"
+    restart_needed = False
+    
+    # Проверяем состояние задачи
+    task_status = "нет задачи"
+    if background_worker_task:
+        if background_worker_task.done():
+            try:
+                if not background_worker_task.cancelled():
+                    background_worker_task.result()  # Получаем результат для проверки на исключения
+                    task_status = "завершена без ошибок"
+                else:
+                    task_status = "отменена"
+            except Exception as e:
+                task_status = f"завершена с ошибкой: {str(e)}"
+            restart_needed = True
+        elif background_worker_task.cancelled():
+            task_status = "отменена"
+            restart_needed = True
+        else:
+            task_status = "выполняется"
+            processor_status = "🟢 Работает"
+    else:
+        restart_needed = True
+    
     # Добавляем информацию о состоянии фоновых процессов
     queue_info += f"\n🖥 <b>Системная информация:</b>\n"
-    queue_info += f"- Фоновый обработчик: {'Работает' if background_worker_running else 'Остановлен'}\n"
+    queue_info += f"- Фоновый обработчик: {processor_status}\n"
     queue_info += f"- Рабочих потоков: {thread_executor._max_workers}\n"
+    
+    # Если обработчик требует перезапуска, запускаем его и уведомляем пользователя
+    if restart_needed:
+        queue_info += f"- <i>⚠️ Обнаружена проблема с обработчиком. Выполняется автоматический перезапуск...</i>\n"
+        # Запускаем перезапуск обработчика асинхронно
+        await asyncio.create_task(ensure_background_processor_running())
+        queue_info += f"- <i>ℹ️ Проверьте состояние через 30 секунд командой /queue</i>\n"
 
     # Отправляем информацию
     await message.answer(queue_info, parse_mode="HTML")
@@ -296,7 +332,7 @@ async def main():
         logger.info('Выполнена очистка старых временных файлов')
         
         # Запускаем фоновый обработчик очереди
-        background_task = asyncio.create_task(background_audio_processor())
+        background_task = asyncio.create_task(background_processor())
         # Ждем 2 секунды, чтобы обработчик успел инициализироваться
         await asyncio.sleep(2)
         logger.info('Запущен фоновый обработчик очереди аудиофайлов')

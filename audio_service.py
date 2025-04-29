@@ -23,8 +23,6 @@ logger = logging.getLogger(__name__)
 # Пул потоков для CPU-интенсивных операций
 thread_executor = ThreadPoolExecutor(max_workers=3)
 
-# Флаг для отслеживания статуса обработчика очереди
-background_worker_running = False
 # Хранение ссылки на задачу фонового обработчика
 background_worker_task = None
 # Флаг для автоматического перезапуска обработчика
@@ -297,20 +295,19 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
         raise
 
 
-async def background_audio_processor():
+async def background_processor():
     """Фоновый обработчик очереди аудиофайлов из базы данных"""
-    global background_worker_running, background_worker_task
+    global background_worker_task
     
     # Используем блокировку для защиты от одновременного запуска нескольких обработчиков
     async with processor_lock:
         # Защита от параллельного запуска нескольких обработчиков
-        if background_worker_running:
+        if background_worker_task:
             logger.warning("Попытка запустить фоновый обработчик, когда он уже запущен")
             return
             
         # Важно: сначала сохраняем ссылку на текущую задачу, затем устанавливаем флаг
         background_worker_task = asyncio.current_task()
-        background_worker_running = True
     
     logger.info("Запущен фоновый обработчик аудиофайлов")
 
@@ -721,7 +718,6 @@ async def background_audio_processor():
         raise  # Пробрасываем ошибку, чтобы она была видна в .done() проверке
     finally:
         async with processor_lock:
-            background_worker_running = False
             logger.info("Фоновый обработчик аудиофайлов завершен")
 
 def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
@@ -763,77 +759,62 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
         return False, "Не удалось отменить задачи на транскрибацию."
 
 async def ensure_background_processor_running():
-    """
-    Функция для проверки и запуска фонового обработчика, если он остановлен
-    """
-    global background_worker_running, background_worker_task, auto_restart_counter, last_restart_time
+    """Гарантирует, что фоновый процессор аудио запущен и работает корректно.
+    Проверяет текущее состояние и при необходимости перезапускает процессор."""
+    global background_worker_task
     
-    # Защита от одновременного запуска нескольких проверок
-    async with processor_lock:
-        # Проверяем, нужно ли перезапускать обработчик
-        restart_needed = False
+    logger.debug(f"Проверка фонового процессора: task={background_worker_task}")
+    
+    # Флаг, указывающий на необходимость перезапуска
+    need_restart = False
+    
+    # Проверяем состояние задачи, если она существует
+    if background_worker_task:
+        if background_worker_task.done():
+            try:
+                if not background_worker_task.cancelled():
+                    background_worker_task.result()  # Проверяем на исключения
+                    logger.info("Фоновый процессор завершился без ошибок, требуется перезапуск")
+                else:
+                    logger.info("Фоновый процессор был отменен, требуется перезапуск")
+                need_restart = True
+            except Exception as e:
+                logger.error(f"Фоновый процессор завершился с ошибкой: {str(e)}, требуется перезапуск")
+                need_restart = True
+        elif background_worker_task.cancelled():
+            logger.info("Фоновый процессор отменен, требуется перезапуск")
+            need_restart = True
+    else:
+        # Если задачи нет, необходим запуск
+        logger.info("Фоновый процессор не запущен, требуется запуск")
+        need_restart = True
+    
+    # Если требуется перезапуск, сначала отменяем текущую задачу
+    if need_restart:
+        logger.info("Перезапуск фонового процессора аудио...")
         
-        # Если есть активный экземпляр задачи, проверяем его состояние
-        if background_worker_task:
-            # Проверяем состояние задачи
-            if background_worker_task.done() or background_worker_task.cancelled():
-                logger.warning(f"Фоновый обработчик не активен (done={background_worker_task.done()}, cancelled={background_worker_task.cancelled()}). Перезапускаем.")
-                restart_needed = True
-                # Проверяем наличие исключений
-                if background_worker_task.done() and not background_worker_task.cancelled():
-                    try:
-                        # Извлекаем результат для проверки на исключения
-                        background_worker_task.result()
-                        logger.info("Фоновый обработчик завершился без ошибок.")
-                    except Exception as e:
-                        logger.error(f"Фоновый обработчик завершился с ошибкой: {e}")
-            elif background_worker_running:
-                # Задача существует и не завершена - всё в порядке
-                logger.debug("Фоновый обработчик активен и работает нормально.")
-                return False
-        else:
-            # Задача еще не создавалась или ссылка на нее утеряна
-            if background_worker_running:
-                logger.warning("Флаг background_worker_running=True, но ссылка на задачу отсутствует. Перезапускаем.")
-            else:
-                logger.warning("Фоновый обработчик не запущен (background_worker_task is None). Запускаем.")
-            restart_needed = True
+        # Отменяем текущую задачу, если она существует и еще не завершена
+        if background_worker_task and not background_worker_task.done():
+            try:
+                background_worker_task.cancel()
+                try:
+                    # Даем время на корректное завершение
+                    await asyncio.wait_for(asyncio.shield(background_worker_task), timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    logger.debug("Задача успешно отменена или тайм-аут ожидания")
+            except Exception as e:
+                logger.error(f"Ошибка при отмене предыдущей задачи: {str(e)}")
         
-        # Если флаг указывает, что обработчик запущен, но задача требует перезапуска,
-        # обновляем флаг для отражения реального состояния
-        if background_worker_running and restart_needed:
-            logger.warning("Обнаружено несоответствие: флаг background_worker_running=True, но задача не активна")
-            background_worker_running = False
+        # Сбрасываем состояние
+        background_worker_task = None
         
-        # Перезапускаем обработчик, если необходимо
-        if restart_needed:
-            # Проверяем, не превышен ли лимит автоматических перезапусков
-            current_time = datetime.now()
-            
-            # Если есть запись о предыдущем перезапуске
-            if last_restart_time:
-                # Если с момента последнего перезапуска прошло более 1 часа, сбрасываем счетчик
-                if (current_time - last_restart_time).total_seconds() > 3600:
-                    auto_restart_counter = 0
-                # Если было слишком много перезапусков за короткий период и автоперезапуск включен
-                elif auto_restart_counter >= MAX_AUTO_RESTARTS and AUTO_RESTART_PROCESSOR:
-                    logger.error(f"Превышено максимальное количество перезапусков ({MAX_AUTO_RESTARTS}). Временно отключаем автоперезапуск.")
-                    # Ждем 5 минут перед сбросом счетчика
-                    await asyncio.sleep(300)
-                    auto_restart_counter = 0
-            
-            # Обновляем время последнего перезапуска
-            last_restart_time = current_time
-            auto_restart_counter += 1
-            
-            # Запускаем обработчик и сразу сохраняем ссылку на него
-            new_task = asyncio.create_task(background_audio_processor())
-            # Не обновляем глобальную переменную, это сделает функция background_audio_processor внутри своей блокировки
-            logger.info(f"Фоновый обработчик перезапущен (перезапуск #{auto_restart_counter})")
-            
-            return True
-        
-        return False
+        # Запускаем новую фоновую задачу
+        background_worker_task = asyncio.create_task(background_processor())
+        logger.info("Новая задача фонового процессора успешно запущена")
+    else:
+        logger.debug("Фоновый процессор работает корректно, перезапуск не требуется")
+    
+    return background_worker_task
 
 # Периодическая проверка состояния обработчика
 async def monitor_background_processor():
