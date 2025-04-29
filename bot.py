@@ -11,8 +11,9 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove
 from openai import OpenAI
 
-from audio_service import background_worker_running, thread_executor, async_cancel_audio_processing, handle_audio_service, \
-    background_audio_processor, init_monitoring
+from audio_service import background_worker_running, thread_executor, \
+    handle_audio_service, \
+    background_audio_processor, init_monitoring, cancel_audio_processing
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
     USE_LOCAL_WHISPER
 from db_service import get_cmd_status, check_message_limit, get_all_from_queue, reset_active_tasks
@@ -225,7 +226,7 @@ async def button_queue(message: types.Message):
 async def cmd_cancel(message: types.Message):
     """Отменяет текущую обработку аудио для пользователя"""
     user_id = message.from_user.id
-    result, msg = await async_cancel_audio_processing(user_id)
+    result, msg = cancel_audio_processing(user_id)
     await message.answer(msg)
 
 @dp.message(lambda message: message.voice or message.audio)
@@ -296,6 +297,8 @@ async def main():
         
         # Запускаем фоновый обработчик очереди
         background_task = asyncio.create_task(background_audio_processor())
+        # Ждем 2 секунды, чтобы обработчик успел инициализироваться
+        await asyncio.sleep(2)
         logger.info('Запущен фоновый обработчик очереди аудиофайлов')
         
         # Инициализируем мониторинг фонового обработчика
