@@ -681,8 +681,8 @@ def should_condition_on_previous_text(file_size_mb):
 
     # Проверяем, нужно ли переключаться на меньшую модель
     if file_size_mb > file_size_threshold:
-        return True
-    return False
+        return False
+    return True
 
 def predict_processing_time(file_path, model_name):
     """
