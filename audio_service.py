@@ -763,7 +763,7 @@ async def ensure_background_processor_running():
     Проверяет текущее состояние и при необходимости перезапускает процессор."""
     global background_worker_task
     
-    logger.debug(f"Проверка фонового процессора: task={background_worker_task}")
+    #logger.debug(f"Проверка фонового процессора: task={background_worker_task}")
     
     # Флаг, указывающий на необходимость перезапуска
     need_restart = False
@@ -812,7 +812,8 @@ async def ensure_background_processor_running():
         background_worker_task = asyncio.create_task(background_processor())
         logger.info("Новая задача фонового процессора успешно запущена")
     else:
-        logger.debug("Фоновый процессор работает корректно, перезапуск не требуется")
+        #logger.debug("Фоновый процессор работает корректно, перезапуск не требуется")
+        pass
     
     return background_worker_task
 
