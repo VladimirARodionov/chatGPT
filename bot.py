@@ -6,9 +6,11 @@ import os
 from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
-from aiogram import types, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove
+from aiogram import types, Dispatcher, F
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
 from audio_service import thread_executor, \
@@ -23,6 +25,10 @@ from audio_utils import list_downloaded_models
 dp = Dispatcher()
 # Загрузка переменных окружения
 load_dotenv()
+
+# Класс состояний для подтверждения отмены задач
+class CancelStates(StatesGroup):
+    waiting_confirmation = State()
 
 # Инициализация Alembic для миграций базы данных
 alembic_cfg = Config("alembic.ini")
@@ -259,11 +265,63 @@ async def button_queue(message: types.Message):
 
 
 @dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message):
-    """Отменяет текущую обработку аудио для пользователя"""
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Отправляет запрос на подтверждение отмены обработки аудио"""
     user_id = message.from_user.id
+    
+    # Создаем инлайн клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, отменить", callback_data="confirm_cancel"),
+            InlineKeyboardButton(text="❌ Нет, не отменять", callback_data="reject_cancel")
+        ]
+    ])
+    
+    # Отправляем сообщение с запросом подтверждения
+    await message.answer(
+        "⚠️ Вы уверены, что хотите отменить все свои задачи на обработку аудио?",
+        reply_markup=keyboard
+    )
+    
+    # Устанавливаем состояние ожидания подтверждения
+    await state.set_state(CancelStates.waiting_confirmation)
+
+
+@dp.callback_query(F.data == "confirm_cancel", StateFilter(CancelStates.waiting_confirmation))
+async def process_cancel_confirmation(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает подтверждение отмены задач"""
+    user_id = callback.from_user.id
+    
+    # Удаляем инлайн клавиатуру
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    # Выполняем отмену
     result, msg = cancel_audio_processing(user_id)
-    await message.answer(msg)
+    
+    # Отвечаем на коллбек
+    await callback.answer("Задачи отменены")
+    
+    # Отправляем сообщение о результате
+    await callback.message.answer(msg)
+    
+    # Сбрасываем состояние
+    await state.clear()
+
+
+@dp.callback_query(F.data == "reject_cancel", StateFilter(CancelStates.waiting_confirmation))
+async def process_cancel_rejection(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает отказ от отмены задач"""
+    # Удаляем инлайн клавиатуру
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    # Отвечаем на коллбек
+    await callback.answer("Отмена задач отменена")
+    
+    # Отправляем сообщение
+    await callback.message.answer("Операция отмены задач отменена. Ваши задачи продолжат выполняться.")
+    
+    # Сбрасываем состояние
+    await state.clear()
 
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_audio(message: types.Message):
