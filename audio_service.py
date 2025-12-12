@@ -294,7 +294,8 @@ async def handle_audio_service(message: Message):
                 return
 
         # Предсказываем время обработки
-        estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
+        # Передаем информацию о типе файла (видео/аудио) для правильного определения
+        estimated_time = predict_processing_time(file_path, WHISPER_MODEL, is_video=is_video)
         estimated_time_str = format_processing_time(estimated_time)
 
         # Уведомляем пользователя о постановке в очередь
@@ -306,7 +307,7 @@ async def handle_audio_service(message: Message):
         if should_switch:
             model_info = f"Модель: {smaller_model} (автоматически выбрана для большого файла вместо {WHISPER_MODEL})"
             # Обновляем время с учетом фактически используемой модели
-            estimated_time = predict_processing_time(file_path, smaller_model)
+            estimated_time = predict_processing_time(file_path, smaller_model, is_video=is_video)
             estimated_time_str = format_processing_time(estimated_time)
 
         # Запускаем фоновый обработчик очереди, если он еще не запущен
@@ -640,8 +641,12 @@ async def background_processor():
                             if should_switch:
                                 current_model = smaller_model
 
+                            # Определяем тип файла для передачи в predict_processing_time
+                            is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
+                            is_video_file = is_video_file or "Видеосообщение" in file_name
+
                             # Получаем предполагаемое оставшееся время
-                            estimated_total = predict_processing_time(file_path, current_model)
+                            estimated_total = predict_processing_time(file_path, current_model, is_video=is_video_file)
                             elapsed_td = timedelta(seconds=int(elapsed))
                             remaining = estimated_total - elapsed_td if estimated_total > elapsed_td else timedelta(seconds=10)
 

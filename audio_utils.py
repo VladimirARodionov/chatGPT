@@ -741,13 +741,14 @@ def should_condition_on_previous_text(file_size_mb):
         return False
     return True
 
-def predict_processing_time(file_path, model_name):
+def predict_processing_time(file_path, model_name, is_video=None):
     """
     Предсказывает примерное время обработки аудиофайла с использованием Whisper.
     
     Аргументы:
         file_path (str): Путь к аудиофайлу
         model_name (str): Название модели Whisper (tiny, base, small, medium, large-v1, large-v2, large-v3)
+        is_video (bool, optional): Явно указывает, является ли файл видео. Если None, определяется автоматически.
         
     Возвращает:
         datetime.timedelta: Предполагаемое время обработки
@@ -755,18 +756,25 @@ def predict_processing_time(file_path, model_name):
     # Получаем размер файла в МБ
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     
-    # Определяем тип файла (видео или аудио) по расширению (первичная проверка)
+    # Определяем тип файла (видео или аудио)
+    # Если тип явно указан, используем его, иначе определяем автоматически
     file_ext = os.path.splitext(file_path)[1].lower()
-    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
-    is_video_file = file_ext in video_extensions
     has_extension = bool(file_ext)
+    
+    if is_video is not None:
+        is_video_file = is_video
+        logger.info(f"Тип файла {file_path} явно указан как {'видео' if is_video else 'аудио'}")
+    else:
+        # Определяем тип файла по расширению (первичная проверка)
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
+        is_video_file = file_ext in video_extensions
     
     # Проверяем наличие ffprobe для получения длительности и определения типа файла
     audio_duration_seconds = 0
     try:
-        # Если расширение отсутствует или файл не определен как видео по расширению,
+        # Если тип не был явно указан, и расширение отсутствует или файл не определен как видео по расширению,
         # проверяем содержимое через ffprobe для точного определения типа
-        if not has_extension or not is_video_file:
+        if is_video is None and (not has_extension or not is_video_file):
             # Проверяем, есть ли видеодорожка в файле
             video_check_result = subprocess.run(
                 [
