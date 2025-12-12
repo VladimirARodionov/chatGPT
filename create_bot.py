@@ -75,6 +75,8 @@ else:
 WHISPER_MODEL = env_config.get('WHISPER_MODEL', 'base')
 USE_LOCAL_WHISPER = env_config.get('USE_LOCAL_WHISPER', 'True').lower() in ('true', '1', 'yes')
 WHISPER_MODELS_DIR = env_config.get('WHISPER_MODELS_DIR', 'whisper_models')
+# Порог размера файла (в МБ) для переключения на модель small
+SMALL_MODEL_THRESHOLD_MB = int(env_config.get('SMALL_MODEL_THRESHOLD_MB', '20'))
 
 # Директории для файлов
 TEMP_AUDIO_DIR = "temp_audio"
