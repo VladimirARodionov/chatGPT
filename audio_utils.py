@@ -753,9 +753,6 @@ def predict_processing_time(file_path, model_name, is_video=None):
     Возвращает:
         datetime.timedelta: Предполагаемое время обработки
     """
-    # Получаем размер файла в МБ
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    
     # Определяем тип файла (видео или аудио)
     # Если тип явно указан, используем его, иначе определяем автоматически
     file_ext = os.path.splitext(file_path)[1].lower()
@@ -769,8 +766,8 @@ def predict_processing_time(file_path, model_name, is_video=None):
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
         is_video_file = file_ext in video_extensions
     
-    # Проверяем наличие ffprobe для получения длительности и определения типа файла
-    audio_duration_seconds = 0
+    # Получаем длительность аудио через ffprobe (не используем размер файла)
+    audio_duration_seconds = None
     try:
         # Если тип не был явно указан, и расширение отсутствует или файл не определен как видео по расширению,
         # проверяем содержимое через ffprobe для точного определения типа
@@ -816,27 +813,26 @@ def predict_processing_time(file_path, model_name, is_video=None):
         
         # Парсим результат
         if result.returncode == 0:
-            output = json.loads(result.stdout)
-            audio_duration_seconds = float(output["format"]["duration"])
+            try:
+                output = json.loads(result.stdout)
+                duration = output.get("format", {}).get("duration")
+                if duration:
+                    audio_duration_seconds = float(duration)
+                    logger.info(f"Получена длительность аудио через ffprobe: {audio_duration_seconds:.2f} секунд")
+                else:
+                    logger.warning(f"ffprobe не вернул длительность для {file_path}")
+            except (ValueError, KeyError, json.JSONDecodeError) as e:
+                logger.warning(f"Ошибка при парсинге результата ffprobe для {file_path}: {e}")
         else:
-            # Если ffprobe не удалось получить длительность, оцениваем по размеру файла
-            if is_video_file:
-                # Для видео: размер файла намного больше из-за видеодорожки
-                # Приблизительно 1 МБ видео ~ 0.45 минуты аудио (зависит от качества видео)
-                # Это учитывает, что большая часть размера видео - это видеодорожка
-                audio_duration_seconds = file_size_mb * 20  # 20 секунд на МБ для видео
-            else:
-                # Для аудио: приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
-                audio_duration_seconds = file_size_mb * 60
-    except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        # Если произошла ошибка, оцениваем по размеру файла
-        logger.warning(f"Не удалось определить тип файла через ffprobe для {file_path}: {e}, используем оценку по расширению")
-        if is_video_file:
-            # Для видео: используем меньший коэффициент (учитывая, что большая часть размера - видеодорожка)
-            audio_duration_seconds = file_size_mb * 20  # 20 секунд на МБ для видео
-        else:
-            # Для аудио: стандартная оценка
-            audio_duration_seconds = file_size_mb * 60
+            logger.warning(f"ffprobe вернул код ошибки {result.returncode} для {file_path}: {result.stderr}")
+            
+    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Ошибка при вызове ffprobe для {file_path}: {e}")
+    
+    # Если не удалось получить длительность, возвращаем минимальное время
+    if audio_duration_seconds is None or audio_duration_seconds <= 0:
+        logger.error(f"Не удалось определить длительность аудио для {file_path}, используем значение по умолчанию: 60 секунд")
+        audio_duration_seconds = 60  # Значение по умолчанию: 1 минута
     
     # Коэффициенты скорости обработки для разных моделей (относительно реального времени)
     # Это приблизительные значения, которые могут отличаться в зависимости от оборудования
@@ -858,7 +854,7 @@ def predict_processing_time(file_path, model_name, is_video=None):
     
     # Фиксированное время на инициализацию модели (в секундах)
     init_time = {
-        "tiny": 1,       # Уменьшено время инициализации
+        "tiny": 1,
         "base": 2,
         "small": 3,
         "medium": 5,
@@ -866,19 +862,14 @@ def predict_processing_time(file_path, model_name, is_video=None):
         "large-v1": 8,
         "large-v2": 10,
         "large-v3": 12,
-        "turbo": 10      # Аналогично large-v2
-    }.get(model_name.lower(), 5)  # Уменьшено время по умолчанию
+        "turbo": 10
+    }.get(model_name.lower(), 5)
     
-    # Фактор для файлов большого размера - обработка замедляется
-    size_penalty = 1.0
-    if file_size_mb > 15:
-        # Для файлов > 15 МБ добавляем штраф времени
-        size_penalty = 1.0 + (file_size_mb - 15) * 0.015  # Уменьшено влияние размера файла
+    # Рассчитываем время обработки только на основе длительности аудио
+    # Не учитываем размер файла, только продолжительность
+    processing_time_seconds = (audio_duration_seconds / speed_factor) + init_time
     
-    # Рассчитываем время обработки
-    processing_time_seconds = (audio_duration_seconds / speed_factor) * size_penalty + init_time
-    
-    # Добавляем 5% запаса для учета других факторов (уменьшено с 10%)
+    # Добавляем 5% запаса для учета других факторов
     processing_time_seconds *= 1.05
     
     return timedelta(seconds=int(processing_time_seconds)) 
