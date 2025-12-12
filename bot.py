@@ -326,7 +326,39 @@ async def process_cancel_rejection(callback: types.CallbackQuery, state: FSMCont
     # Сбрасываем состояние
     await state.clear()
 
-@dp.message(lambda message: message.voice or message.audio or message.video or message.video_note)
+def is_media_file(message: types.Message) -> bool:
+    """Проверяет, является ли сообщение медиа-файлом (аудио или видео)"""
+    # Прямые типы медиа
+    if message.voice or message.audio or message.video or message.video_note:
+        return True
+    
+    # Проверяем документы на наличие видео/аудио по MIME-типу или расширению
+    if message.document:
+        mime_type = message.document.mime_type or ""
+        file_name = message.document.file_name or ""
+        
+        # Видео форматы
+        video_mime_types = ["video/", "application/vnd.apple.mpegurl"]
+        video_extensions = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".ogv"]
+        
+        # Аудио форматы
+        audio_mime_types = ["audio/"]
+        audio_extensions = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus", ".amr"]
+        
+        # Проверяем MIME-тип
+        if any(mime_type.startswith(vt) for vt in video_mime_types):
+            return True
+        if any(mime_type.startswith(at) for at in audio_mime_types):
+            return True
+        
+        # Проверяем расширение файла
+        file_name_lower = file_name.lower()
+        if any(file_name_lower.endswith(ext) for ext in video_extensions + audio_extensions):
+            return True
+    
+    return False
+
+@dp.message(lambda message: is_media_file(message))
 async def handle_audio(message: types.Message):
     await handle_audio_service(message)
 
@@ -334,6 +366,12 @@ async def handle_audio(message: types.Message):
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
+    
+    # Проверяем, что сообщение содержит текст
+    if not message.text:
+        # Если сообщение не содержит текста (например, только медиа), игнорируем его
+        # Медиа-файлы обрабатываются отдельными обработчиками
+        return
     
     if not check_message_limit(user_id):
         await message.answer("Вы достигли дневного лимита в 50 сообщений. Попробуйте завтра!")

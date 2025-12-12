@@ -47,6 +47,31 @@ async def handle_audio_service(message: Message):
     # Определяем тип файла
     is_video = message.video is not None or message.video_note is not None
     is_audio = message.voice is not None or message.audio is not None
+    is_document = message.document is not None
+    
+    # Если это документ, проверяем его тип по MIME-типу или расширению
+    if is_document and not (is_video or is_audio):
+        mime_type = message.document.mime_type or ""
+        file_name = message.document.file_name or ""
+        
+        # Видео форматы
+        video_mime_types = ["video/", "application/vnd.apple.mpegurl"]
+        video_extensions = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".ogv"]
+        
+        # Аудио форматы
+        audio_mime_types = ["audio/"]
+        audio_extensions = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus", ".amr"]
+        
+        file_name_lower = file_name.lower()
+        
+        # Проверяем, является ли документ видео
+        if any(mime_type.startswith(vt) for vt in video_mime_types) or \
+           any(file_name_lower.endswith(ext) for ext in video_extensions):
+            is_video = True
+        # Проверяем, является ли документ аудио
+        elif any(mime_type.startswith(at) for at in audio_mime_types) or \
+             any(file_name_lower.endswith(ext) for ext in audio_extensions):
+            is_audio = True
     
     # Отправляем сообщение о начале обработки
     file_type_text = "видео" if is_video else "аудио"
@@ -55,9 +80,28 @@ async def handle_audio_service(message: Message):
     try:
         # Определяем, что за файл пришел
         if is_video:
-            file_id = message.video.file_id if message.video else message.video_note.file_id
+            if message.video:
+                file_id = message.video.file_id
+            elif message.video_note:
+                file_id = message.video_note.file_id
+            elif message.document:
+                file_id = message.document.file_id
+            else:
+                await processing_msg.edit_text("Ошибка: не удалось определить файл видео")
+                return
+        elif is_audio:
+            if message.voice:
+                file_id = message.voice.file_id
+            elif message.audio:
+                file_id = message.audio.file_id
+            elif message.document:
+                file_id = message.document.file_id
+            else:
+                await processing_msg.edit_text("Ошибка: не удалось определить файл аудио")
+                return
         else:
-            file_id = message.voice.file_id if message.voice else message.audio.file_id
+            await processing_msg.edit_text("Ошибка: неподдерживаемый тип файла")
+            return
 
         # Имя исходного файла
         file_name = "Голосовое сообщение"
@@ -65,6 +109,8 @@ async def handle_audio_service(message: Message):
             file_name = message.audio.file_name
         elif message.video and message.video.file_name:
             file_name = message.video.file_name
+        elif message.document and message.document.file_name:
+            file_name = message.document.file_name
         elif message.video_note:
             file_name = "Видеосообщение"
 
@@ -74,10 +120,17 @@ async def handle_audio_service(message: Message):
             file_ext = "mp4"  # По умолчанию для видео
             if message.video and message.video.file_name:
                 file_ext = os.path.splitext(message.video.file_name)[1][1:] or "mp4"
+            elif message.document and message.document.file_name:
+                file_ext = os.path.splitext(message.document.file_name)[1][1:] or "mp4"
             file_path = f"{TEMP_AUDIO_DIR}/video_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
         else:
             # Путь для сохранения аудио
-            file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
+            if message.document and message.document.file_name:
+                # Сохраняем с оригинальным расширением для документов
+                file_ext = os.path.splitext(message.document.file_name)[1][1:] or "ogg"
+                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+            else:
+                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
 
         # Получаем информацию о файле и скачиваем его
         is_large_file = False
@@ -325,12 +378,33 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
                             max_retries=3,
                             timeout=30)
 
+            # Проверяем, что файл существует и не пустой
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                logger.error(f"Файл не существует или пуст перед транскрибацией через OpenAI API: {file_path}")
+                raise FileNotFoundError(f"Файл не существует или пуст: {file_path}")
+
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file
                 )
-            return transcription.text
+            
+            # Проверяем результат транскрибации
+            if transcription is None:
+                logger.error("OpenAI API вернул None при транскрибации")
+                raise ValueError("Транскрибация вернула пустой результат")
+            
+            # Проверяем наличие текста в результате
+            if not hasattr(transcription, 'text') or transcription.text is None:
+                logger.error("OpenAI API вернул транскрибацию без текста")
+                raise ValueError("Транскрибация не содержит текста")
+            
+            text = transcription.text.strip()
+            if not text:
+                logger.warning("Транскрибация вернула пустую строку")
+                return ""
+            
+            return text
     except Exception as e:
         logger.exception(f"Ошибка при транскрибации: {e}")
         raise
@@ -653,10 +727,21 @@ async def background_processor():
                         message_text += f"ℹ️ Для обработки использована модель {smaller_model} вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
 
                 # Получаем текст транскрибации
-                transcription_text = transcription
+                transcription_text = ""
                 # Если результат в формате словаря, извлекаем текст
                 if isinstance(transcription, dict):
-                    transcription_text = transcription.get('text', '')
+                    transcription_text = transcription.get('text', '') or ''
+                elif isinstance(transcription, str):
+                    transcription_text = transcription or ''
+                else:
+                    # Если это объект с атрибутом text
+                    transcription_text = getattr(transcription, 'text', '') if transcription else ''
+                
+                # Убеждаемся, что transcription_text - это строка и не None
+                if transcription_text is None:
+                    transcription_text = ''
+                else:
+                    transcription_text = str(transcription_text).strip()
 
                 # Проверяем, не пустой ли текст транскрибации
                 if not transcription_text:
