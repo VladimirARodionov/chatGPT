@@ -9,7 +9,7 @@ from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 
 from audio_utils import predict_processing_time, should_use_smaller_model, convert_audio_format, \
-    transcribe_with_whisper, should_condition_on_previous_text
+    transcribe_with_whisper, should_condition_on_previous_text, extract_audio_from_video
 from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, \
     LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT
 from db_service import check_message_limit, get_queue, add_to_queue, set_active_queue, set_finished_queue, \
@@ -44,20 +44,93 @@ async def handle_audio_service(message: Message):
         await message.answer("Вы достигли дневного лимита в 50 сообщений. Попробуйте завтра!")
         return
 
+    # Определяем тип файла
+    is_video = message.video is not None or message.video_note is not None
+    is_audio = message.voice is not None or message.audio is not None
+    is_document = message.document is not None
+    
+    # Если это документ, проверяем его тип по MIME-типу или расширению
+    if is_document and not (is_video or is_audio):
+        mime_type = message.document.mime_type or ""
+        file_name = message.document.file_name or ""
+        
+        # Видео форматы
+        video_mime_types = ["video/", "application/vnd.apple.mpegurl"]
+        video_extensions = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".ogv"]
+        
+        # Аудио форматы
+        audio_mime_types = ["audio/"]
+        audio_extensions = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus", ".amr"]
+        
+        file_name_lower = file_name.lower()
+        
+        # Проверяем, является ли документ видео
+        if any(mime_type.startswith(vt) for vt in video_mime_types) or \
+           any(file_name_lower.endswith(ext) for ext in video_extensions):
+            is_video = True
+        # Проверяем, является ли документ аудио
+        elif any(mime_type.startswith(at) for at in audio_mime_types) or \
+             any(file_name_lower.endswith(ext) for ext in audio_extensions):
+            is_audio = True
+    
     # Отправляем сообщение о начале обработки
-    processing_msg = await message.answer("Загружаю и обрабатываю аудио...")
+    file_type_text = "видео" if is_video else "аудио"
+    processing_msg = await message.answer(f"Загружаю и обрабатываю {file_type_text}...")
 
     try:
         # Определяем, что за файл пришел
-        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        if is_video:
+            if message.video:
+                file_id = message.video.file_id
+            elif message.video_note:
+                file_id = message.video_note.file_id
+            elif message.document:
+                file_id = message.document.file_id
+            else:
+                await processing_msg.edit_text("Ошибка: не удалось определить файл видео")
+                return
+        elif is_audio:
+            if message.voice:
+                file_id = message.voice.file_id
+            elif message.audio:
+                file_id = message.audio.file_id
+            elif message.document:
+                file_id = message.document.file_id
+            else:
+                await processing_msg.edit_text("Ошибка: не удалось определить файл аудио")
+                return
+        else:
+            await processing_msg.edit_text("Ошибка: неподдерживаемый тип файла")
+            return
 
         # Имя исходного файла
         file_name = "Голосовое сообщение"
         if message.audio and message.audio.file_name:
             file_name = message.audio.file_name
+        elif message.video and message.video.file_name:
+            file_name = message.video.file_name
+        elif message.document and message.document.file_name:
+            file_name = message.document.file_name
+        elif message.video_note:
+            file_name = "Видеосообщение"
 
-        # Путь для сохранения аудио
-        file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
+        # Определяем расширение файла для сохранения
+        if is_video:
+            # Для видео сохраняем в исходном формате, затем извлечем аудио
+            file_ext = "mp4"  # По умолчанию для видео
+            if message.video and message.video.file_name:
+                file_ext = os.path.splitext(message.video.file_name)[1][1:] or "mp4"
+            elif message.document and message.document.file_name:
+                file_ext = os.path.splitext(message.document.file_name)[1][1:] or "mp4"
+            file_path = f"{TEMP_AUDIO_DIR}/video_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+        else:
+            # Путь для сохранения аудио
+            if message.document and message.document.file_name:
+                # Сохраняем с оригинальным расширением для документов
+                file_ext = os.path.splitext(message.document.file_name)[1][1:] or "ogg"
+                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+            else:
+                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
 
         # Получаем информацию о файле и скачиваем его
         is_large_file = False
@@ -79,20 +152,21 @@ async def handle_audio_service(message: Message):
                         f"⚠️ Файл слишком большой для обработки. Максимальный размер: {MAX_FILE_SIZE/1024/1024:.1f} МБ.\n\n"
                         f"Размер вашего файла: {file_size/1024/1024:.1f} МБ.\n\n"
                         f"Рекомендации:\n"
-                        f"• Сократите длительность аудио\n"
-                        f"• Разделите длинное аудио на несколько частей\n"
-                        f"• Используйте формат с большим сжатием (MP3 с низким битрейтом)"
+                        f"• Сократите длительность {'видео' if is_video else 'аудио'}\n"
+                        f"• Разделите длинное {'видео' if is_video else 'аудио'} на несколько частей\n"
+                        f"• Используйте формат с большим сжатием"
                     )
                     return
 
                 # Проверяем, необходимо ли использовать прямую загрузку
                 if file_size <= STANDARD_API_LIMIT:
-                    await processing_msg.edit_text("Скачиваю аудиофайл стандартным методом...")
+                    download_text = f"Скачиваю {file_type_text}файл стандартным методом..."
+                    await processing_msg.edit_text(download_text)
                     download_success = await download_voice(file, file_path)
 
                     if not download_success:
                         await processing_msg.edit_text(
-                            "⚠️ Не удалось скачать аудиофайл стандартным методом. "
+                            f"⚠️ Не удалось скачать {file_type_text}файл стандартным методом. "
                             "Попробуйте еще раз или отправьте файл меньшего размера."
                         )
                         return
@@ -151,9 +225,9 @@ async def handle_audio_service(message: Message):
                     f"Максимальный поддерживаемый размер файла: 2000 МБ.\n\n"
                     f"Рекомендации:\n"
                     f"• Используйте файл меньшего размера\n"
-                    f"• Сократите длительность аудио\n"
-                    f"• Разделите длинное аудио на несколько частей\n"
-                    f"• Используйте формат с большим сжатием (MP3 с низким битрейтом)"
+                    f"• Сократите длительность {'видео' if is_video else 'аудио'}\n"
+                    f"• Разделите длинное {'видео' if is_video else 'аудио'} на несколько частей\n"
+                    f"• Используйте формат с большим сжатием"
                 )
                 return
             else:
@@ -167,8 +241,27 @@ async def handle_audio_service(message: Message):
 
         # Проверяем, что файл успешно скачан
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            await processing_msg.edit_text("Ошибка: не удалось скачать аудиофайл или файл пустой.")
+            await processing_msg.edit_text(f"Ошибка: не удалось скачать {file_type_text}файл или файл пустой.")
             return
+
+        # Если это видео, извлекаем аудио из него
+        original_file_path = file_path
+        if is_video:
+            try:
+                await processing_msg.edit_text("Извлекаю аудиодорожку из видео...")
+                file_path = await extract_audio_from_video(file_path)
+                logger.info(f"Аудио успешно извлечено из видео: {file_path}")
+                
+                # Удаляем оригинальное видео после извлечения аудио (опционально, для экономии места)
+                # Можно оставить, если нужно сохранить видео
+                # try:
+                #     os.remove(original_file_path)
+                # except Exception as e:
+                #     logger.warning(f"Не удалось удалить оригинальное видео: {e}")
+            except Exception as e:
+                await processing_msg.edit_text(f"Ошибка при извлечении аудио из видео: {str(e)}")
+                logger.exception(f"Ошибка при извлечении аудио из видео: {e}")
+                return
 
         # Предсказываем время обработки
         estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
@@ -213,8 +306,9 @@ async def handle_audio_service(message: Message):
 
             position_text = f"🕒 Номер вашего файла в очереди: {position}\nПеред вами {files_before} {files_word} ожидают обработки."
 
+        file_type_label = "Видеофайл" if is_video else "Аудиофайл"
         await processing_msg.edit_text(
-            f"Аудиофайл успешно загружен и поставлен в очередь на обработку.\n"
+            f"{file_type_label} успешно загружен и поставлен в очередь на обработку.\n"
             f"Размер файла: {file_size_mb:.2f} МБ\n"
             f"{model_info}\n"
             f"Метод загрузки: {'Прямая загрузка через Local Bot API' if is_large_file else 'Стандартный API'}\n\n"
@@ -224,7 +318,7 @@ async def handle_audio_service(message: Message):
             f"Для отмены обработки используйте команду /cancel"
         )
         
-        logger.info(f"Аудиофайл от пользователя {user_id} добавлен в очередь на обработку.")
+        logger.info(f"{file_type_label} от пользователя {user_id} добавлен в очередь на обработку.")
 
     except TelegramBadRequest as e:
         if "file is too big" in str(e).lower():
@@ -233,9 +327,9 @@ async def handle_audio_service(message: Message):
                 f"Текущее ограничение: 20 МБ (даже при использовании Local Bot API)\n\n"
                 f"Рекомендации:\n"
                 f"• Используйте файл меньшего размера (до 20 МБ)\n"
-                f"• Сократите длительность аудио\n"
-                f"• Разделите длинное аудио на несколько частей\n"
-                f"• Конвертируйте файл в формат с бóльшим сжатием (например, MP3 96 kbps)"
+                f"• Сократите длительность {'видео' if is_video else 'аудио'}\n"
+                f"• Разделите длинное {'видео' if is_video else 'аудио'} на несколько частей\n"
+                f"• Конвертируйте файл в формат с бóльшим сжатием"
             )
             logger.error(f"Ошибка 'file is too big' при обработке аудио: {e}")
         else:
@@ -284,12 +378,33 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
                             max_retries=3,
                             timeout=30)
 
+            # Проверяем, что файл существует и не пустой
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                logger.error(f"Файл не существует или пуст перед транскрибацией через OpenAI API: {file_path}")
+                raise FileNotFoundError(f"Файл не существует или пуст: {file_path}")
+
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file
                 )
-            return transcription.text
+            
+            # Проверяем результат транскрибации
+            if transcription is None:
+                logger.error("OpenAI API вернул None при транскрибации")
+                raise ValueError("Транскрибация вернула пустой результат")
+            
+            # Проверяем наличие текста в результате
+            if not hasattr(transcription, 'text') or transcription.text is None:
+                logger.error("OpenAI API вернул транскрибацию без текста")
+                raise ValueError("Транскрибация не содержит текста")
+            
+            text = transcription.text.strip()
+            if not text:
+                logger.warning("Транскрибация вернула пустую строку")
+                return ""
+            
+            return text
     except Exception as e:
         logger.exception(f"Ошибка при транскрибации: {e}")
         raise
@@ -458,7 +573,7 @@ async def background_processor():
                                     logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
 
                                 # Сообщаем пользователю об отмене
-                                await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                                await processing_msg.edit_text("❌ Обработка была отменена.")
                                 break
 
                         # Обновляем сообщение о статусе каждые 30 секунд
@@ -487,8 +602,12 @@ async def background_processor():
                                 percent_complete = 0
                                 progress_bar = "░" * 20
 
+                            # Определяем тип файла
+                            is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
+                            file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
+                            
                             status_message = (
-                                f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
+                                f"Транскрибирую {file_type_label} {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                 f"⏱ Прошло времени: {time_str}\n"
                                 f"⌛ Осталось примерно: {str(remaining)}\n"
                                 f"📊 Прогресс: {progress_bar} {percent_complete}%\n"
@@ -512,7 +631,7 @@ async def background_processor():
                         transcription = await future
                     except asyncio.CancelledError:
                         logger.info(f"Транскрибация для пользователя {user_id} отменена")
-                        await processing_msg.edit_text("❌ Обработка аудио была отменена.")
+                        await processing_msg.edit_text("❌ Обработка была отменена.")
                         set_cancelled_queue(active_task.id)
                         continue
                     except Exception as transcribe_error:
@@ -527,16 +646,20 @@ async def background_processor():
                     set_finished_queue(active_task.id)
                     continue
 
+                # Определяем тип файла для сообщений об ошибках
+                is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
+                file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
+                
                 # Проверяем, получили ли мы результат
                 if transcription is None:
                     # Если транскрибация не удалась, сообщаем об ошибке
                     await processing_msg.edit_text(
-                        f"❌ Ошибка при транскрибации аудио: {file_name}\n\n"
-                        f"Не удалось обработать аудиофайл. Возможные причины:\n"
+                        f"❌ Ошибка при транскрибации {file_type_label}: {file_name}\n\n"
+                        f"Не удалось обработать {file_type_label}файл. Возможные причины:\n"
                         f"• Файл повреждён или имеет неподдерживаемый формат\n"
-                        f"• Аудио не содержит речи или имеет слишком низкое качество\n"
+                        f"• {file_type_label.capitalize()} не содержит речи или имеет слишком низкое качество\n"
                         f"• Ошибка при обработке модели Whisper\n\n"
-                        f"Пожалуйста, попробуйте отправить другой аудиофайл или обратитесь к администратору."
+                        f"Пожалуйста, попробуйте отправить другой {file_type_label}файл или обратитесь к администратору."
                     )
 
                     # Удаляем временные файлы
@@ -574,8 +697,13 @@ async def background_processor():
                     last_name
                 )
 
+                # Определяем тип файла
+                is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
+                file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
+                emoji = "🎥" if file_type_label == "видео" else "🎤"
+                
                 # Формируем текстовое сообщение
-                message_text = f"🎤 Транскрибация аудио: {file_name}\n\n"
+                message_text = f"{emoji} Транскрибация {file_type_label}: {file_name}\n\n"
 
                 # Определяем, какая модель использовалась
                 used_model = WHISPER_MODEL
@@ -599,16 +727,27 @@ async def background_processor():
                         message_text += f"ℹ️ Для обработки использована модель {smaller_model} вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
 
                 # Получаем текст транскрибации
-                transcription_text = transcription
+                transcription_text = ""
                 # Если результат в формате словаря, извлекаем текст
                 if isinstance(transcription, dict):
-                    transcription_text = transcription.get('text', '')
+                    transcription_text = transcription.get('text', '') or ''
+                elif isinstance(transcription, str):
+                    transcription_text = transcription or ''
+                else:
+                    # Если это объект с атрибутом text
+                    transcription_text = getattr(transcription, 'text', '') if transcription else ''
+                
+                # Убеждаемся, что transcription_text - это строка и не None
+                if transcription_text is None:
+                    transcription_text = ''
+                else:
+                    transcription_text = str(transcription_text).strip()
 
                 # Проверяем, не пустой ли текст транскрибации
                 if not transcription_text:
                     await processing_msg.edit_text(
-                        f"⚠️ Предупреждение: Транскрибация аудио не содержит текста.\n\n"
-                        f"Возможно, аудио не содержит распознаваемой речи или имеет слишком низкое качество."
+                        f"⚠️ Предупреждение: Транскрибация {file_type_label} не содержит текста.\n\n"
+                        f"Возможно, {file_type_label} не содержит распознаваемой речи или имеет слишком низкое качество."
                     )
 
                     # Удаляем временные файлы
@@ -642,10 +781,11 @@ async def background_processor():
                     await processing_msg.edit_text(message_text + preview_text)
 
                     # Отправляем файл с полной транскрибацией безопасным способом
+                    caption_text = f"Полная транскрибация {file_type_label}"
                     await send_file_safely(
                         message_stub,
                         transcript_file_path,
-                        caption="Полная транскрибация аудио"
+                        caption=caption_text
                     )
 
                     # Проверяем наличие SRT-файла и отправляем его

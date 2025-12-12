@@ -98,7 +98,11 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
         segments = text.get('segments', [])
 
         with open(filename, "w", encoding="utf-8") as file:
-            file.write(f"Транскрибация аудио\n")
+            # Определяем тип файла по имени
+            file_type = "видео" if original_file_name and any(ext in original_file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv']) else "аудио"
+            if original_file_name == "Видеосообщение":
+                file_type = "видео"
+            file.write(f"Транскрибация {file_type}\n")
             file.write(f"Дата и время: {timestamp}\n")
             file.write(f"Язык: {language}\n")
             file.write(f"ID пользователя: {user_id}\n")
@@ -108,7 +112,9 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
             if first_name or last_name:
                 user_fullname = f"{first_name or ''} {last_name or ''}".strip()
                 file.write(f"Имя: {user_fullname}\n")
-            if original_file_name and original_file_name != "Голосовое сообщение":
+            if original_file_name and original_file_name not in ["Голосовое сообщение", "Видеосообщение"]:
+                file.write(f"Файл: {original_file_name}\n")
+            elif original_file_name:
                 file.write(f"Файл: {original_file_name}\n")
             file.write("\n=== ПОЛНЫЙ ТЕКСТ ===\n\n")
 
@@ -134,8 +140,12 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
         text_str = str(text)
         paragraphs = text_str.replace('. ', '.\n').replace('! ', '!\n').replace('? ', '?\n')
 
+        # Определяем тип файла по имени
+        file_type = "видео" if original_file_name and any(ext in original_file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv']) else "аудио"
+        if original_file_name == "Видеосообщение":
+            file_type = "видео"
         with open(filename, "w", encoding="utf-8") as file:
-            file.write(f"Транскрибация аудио\n")
+            file.write(f"Транскрибация {file_type}\n")
             file.write(f"Дата и время: {timestamp}\n")
             file.write(f"ID пользователя: {user_id}\n")
             # Добавляем информацию о пользователе
@@ -144,7 +154,9 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
             if first_name or last_name:
                 user_fullname = f"{first_name or ''} {last_name or ''}".strip()
                 file.write(f"Имя: {user_fullname}\n")
-            if original_file_name and original_file_name != "Голосовое сообщение":
+            if original_file_name and original_file_name not in ["Голосовое сообщение", "Видеосообщение"]:
+                file.write(f"Файл: {original_file_name}\n")
+            elif original_file_name:
                 file.write(f"Файл: {original_file_name}\n")
             file.write("\n=== ПОЛНЫЙ ТЕКСТ ===\n\n")
             file.write(paragraphs)
@@ -370,7 +382,7 @@ async def send_file_safely(message, file_path, caption=None):
 
 
 async def download_voice(file, destination):
-    """Скачивание голосового сообщения"""
+    """Скачивание голосового сообщения, аудио или видео файла"""
     try:
         # Проверяем, существует ли директория
         directory = os.path.dirname(destination)
