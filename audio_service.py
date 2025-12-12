@@ -294,7 +294,8 @@ async def handle_audio_service(message: Message):
                 return
 
         # Предсказываем время обработки
-        estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
+        # Передаем информацию о типе файла (видео/аудио) для правильного определения
+        estimated_time = predict_processing_time(file_path, WHISPER_MODEL, is_video=is_video)
         estimated_time_str = format_processing_time(estimated_time)
 
         # Уведомляем пользователя о постановке в очередь
@@ -306,7 +307,7 @@ async def handle_audio_service(message: Message):
         if should_switch:
             model_info = f"Модель: {smaller_model} (автоматически выбрана для большого файла вместо {WHISPER_MODEL})"
             # Обновляем время с учетом фактически используемой модели
-            estimated_time = predict_processing_time(file_path, smaller_model)
+            estimated_time = predict_processing_time(file_path, smaller_model, is_video=is_video)
             estimated_time_str = format_processing_time(estimated_time)
 
         # Запускаем фоновый обработчик очереди, если он еще не запущен
@@ -530,17 +531,38 @@ async def background_processor():
                     )
                     continue
                 
-                # Пытаемся получить объект message для ответа
-                try:
-                    # Сначала попробуем получить сообщение по ID
-                    processing_msg = await bot.get_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить сообщение: {e}")
-                    # Если не удалось получить сообщение, создадим новое
-                    processing_msg = await bot.send_message(
-                        chat_id=chat_id,
-                        text="Обработка аудиофайла началась..."
-                    )
+                # Создаем объект-заглушку для сообщения, которое будем редактировать
+                # В aiogram нет метода get_message, поэтому создаем заглушку с методом edit_text
+                class MessageStub:
+                    def __init__(self, bot, chat_id, message_id):
+                        self.bot = bot
+                        self.chat_id = chat_id
+                        self.message_id = message_id
+                        self.chat = type('obj', (object,), {'id': chat_id})()
+                    
+                    async def edit_text(self, text, **kwargs):
+                        """Редактирует существующее сообщение, при неудаче создает новое"""
+                        try:
+                            await self.bot.edit_message_text(
+                                chat_id=self.chat_id,
+                                message_id=self.message_id,
+                                text=text,
+                                **kwargs
+                            )
+                        except Exception as e:
+                            logger.warning(f"Не удалось отредактировать сообщение {self.message_id}: {e}")
+                            # Если редактирование не удалось, отправляем новое сообщение
+                            new_msg = await self.bot.send_message(
+                                chat_id=self.chat_id,
+                                text=text
+                            )
+                            # Обновляем message_id для последующих вызовов
+                            self.message_id = new_msg.message_id
+
+                # Создаем заглушку для сохраненного сообщения
+                # При первом вызове edit_text она попытается отредактировать сообщение,
+                # а если не получится - создаст новое
+                processing_msg = MessageStub(bot, chat_id, message_id)
 
                 # Сообщаем о начале транскрибации
                 await processing_msg.edit_text(
@@ -619,8 +641,12 @@ async def background_processor():
                             if should_switch:
                                 current_model = smaller_model
 
+                            # Определяем тип файла для передачи в predict_processing_time
+                            is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
+                            is_video_file = is_video_file or "Видеосообщение" in file_name
+
                             # Получаем предполагаемое оставшееся время
-                            estimated_total = predict_processing_time(file_path, current_model)
+                            estimated_total = predict_processing_time(file_path, current_model, is_video=is_video_file)
                             elapsed_td = timedelta(seconds=int(elapsed))
                             remaining = estimated_total - elapsed_td if estimated_total > elapsed_td else timedelta(seconds=10)
 
