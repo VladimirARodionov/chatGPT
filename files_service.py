@@ -71,7 +71,24 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
         Путь к сохраненному файлу
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{TRANSCRIPTION_DIR}/transcription_{user_id}_{timestamp}.txt"
+    
+    # Определяем базовое имя файла
+    if original_file_name and original_file_name != "Голосовое сообщение":
+        # Извлекаем имя файла без расширения
+        base_name = os.path.splitext(original_file_name)[0]
+        # Убираем недопустимые символы для файловой системы
+        base_name = re.sub(r'[<>:"/\\|?*]', '_', base_name)
+        # Ограничиваем длину имени файла
+        if len(base_name) > 200:
+            base_name = base_name[:200]
+        file_basename = base_name
+    else:
+        # Для голосовых сообщений используем "transcription" как базовое имя
+        file_basename = "transcription"
+    
+    # Всегда добавляем user_id и timestamp к базовому имени
+    file_basename = f"{file_basename}_{user_id}_{timestamp}"
+    filename = f"{TRANSCRIPTION_DIR}/{file_basename}.txt"
 
     # Обрабатываем разные форматы результатов транскрибации
     if isinstance(text, dict):
@@ -109,7 +126,7 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
                     file.write(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {segment_text}\n")
 
                 # Создаем SRT-файл для субтитров, если есть сегменты
-                srt_filename = f"{TRANSCRIPTION_DIR}/transcription_{user_id}_{timestamp}.srt"
+                srt_filename = f"{TRANSCRIPTION_DIR}/{file_basename}.srt"
                 save_srt_file(segments, srt_filename)
                 logger.info(f"Создан SRT-файл субтитров: {srt_filename}")
     else:
