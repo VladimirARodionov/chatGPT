@@ -34,7 +34,7 @@ def save_srt_file(segments, filename):
         Путь к сохраненному файлу
     """
     try:
-        with open(filename, "w", encoding="utf-8") as file:
+        with open(filename, "w", encoding="utf-8-sig") as file:
             for i, segment in enumerate(segments, 1):
                 start = segment.get('start', 0)
                 end = segment.get('end', 0)
