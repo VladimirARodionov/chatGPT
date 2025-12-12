@@ -755,6 +755,11 @@ def predict_processing_time(file_path, model_name):
     # Получаем размер файла в МБ
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     
+    # Определяем тип файла (видео или аудио) по расширению
+    file_ext = os.path.splitext(file_path)[1].lower()
+    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
+    is_video_file = file_ext in video_extensions
+    
     # Проверяем наличие ffprobe для получения длительности
     audio_duration_seconds = 0
     try:
@@ -777,11 +782,22 @@ def predict_processing_time(file_path, model_name):
             audio_duration_seconds = float(output["format"]["duration"])
         else:
             # Если ffprobe не удалось получить длительность, оцениваем по размеру файла
-            # Приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
-            audio_duration_seconds = file_size_mb * 60
+            if is_video_file:
+                # Для видео: размер файла намного больше из-за видеодорожки
+                # Приблизительно 1 МБ видео ~ 0.45 минуты аудио (зависит от качества видео)
+                # Это учитывает, что большая часть размера видео - это видеодорожка
+                audio_duration_seconds = file_size_mb * 20  # 20 секунд на МБ для видео
+            else:
+                # Для аудио: приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
+                audio_duration_seconds = file_size_mb * 60
     except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError):
         # Если произошла ошибка, оцениваем по размеру файла
-        audio_duration_seconds = file_size_mb * 60
+        if is_video_file:
+            # Для видео: используем меньший коэффициент (учитывая, что большая часть размера - видеодорожка)
+            audio_duration_seconds = file_size_mb * 27  # 27 секунд на МБ для видео
+        else:
+            # Для аудио: стандартная оценка
+            audio_duration_seconds = file_size_mb * 60
     
     # Коэффициенты скорости обработки для разных моделей (относительно реального времени)
     # Это приблизительные значения, которые могут отличаться в зависимости от оборудования
