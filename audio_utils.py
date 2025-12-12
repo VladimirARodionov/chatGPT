@@ -7,7 +7,7 @@ import time
 import subprocess
 import json
 
-from create_bot import env_config
+from create_bot import env_config, SMALL_MODEL_THRESHOLD_MB
 
 logger = logging.getLogger(__name__)
 
@@ -711,7 +711,8 @@ def should_use_smaller_model(file_size_mb, model_name):
     heavy_models = ["medium", "large", "large-v2", "large-v3", "turbo"]
     
     # Пороги размера файла для переключения на модель меньшего размера
-    file_size_threshold = 20  # МБ
+    # Значение берется из конфигурации .env файла (SMALL_MODEL_THRESHOLD_MB)
+    file_size_threshold = SMALL_MODEL_THRESHOLD_MB  # МБ
     
     # Проверяем, нужно ли переключаться на меньшую модель
     if file_size_mb > file_size_threshold and model_name in heavy_models:
