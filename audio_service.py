@@ -530,17 +530,38 @@ async def background_processor():
                     )
                     continue
                 
-                # Пытаемся получить объект message для ответа
-                try:
-                    # Сначала попробуем получить сообщение по ID
-                    processing_msg = await bot.get_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить сообщение: {e}")
-                    # Если не удалось получить сообщение, создадим новое
-                    processing_msg = await bot.send_message(
-                        chat_id=chat_id,
-                        text="Обработка аудиофайла началась..."
-                    )
+                # Создаем объект-заглушку для сообщения, которое будем редактировать
+                # В aiogram нет метода get_message, поэтому создаем заглушку с методом edit_text
+                class MessageStub:
+                    def __init__(self, bot, chat_id, message_id):
+                        self.bot = bot
+                        self.chat_id = chat_id
+                        self.message_id = message_id
+                        self.chat = type('obj', (object,), {'id': chat_id})()
+                    
+                    async def edit_text(self, text, **kwargs):
+                        """Редактирует существующее сообщение, при неудаче создает новое"""
+                        try:
+                            await self.bot.edit_message_text(
+                                chat_id=self.chat_id,
+                                message_id=self.message_id,
+                                text=text,
+                                **kwargs
+                            )
+                        except Exception as e:
+                            logger.warning(f"Не удалось отредактировать сообщение {self.message_id}: {e}")
+                            # Если редактирование не удалось, отправляем новое сообщение
+                            new_msg = await self.bot.send_message(
+                                chat_id=self.chat_id,
+                                text=text
+                            )
+                            # Обновляем message_id для последующих вызовов
+                            self.message_id = new_msg.message_id
+
+                # Создаем заглушку для сохраненного сообщения
+                # При первом вызове edit_text она попытается отредактировать сообщение,
+                # а если не получится - создаст новое
+                processing_msg = MessageStub(bot, chat_id, message_id)
 
                 # Сообщаем о начале транскрибации
                 await processing_msg.edit_text(
