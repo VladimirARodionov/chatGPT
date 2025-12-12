@@ -37,6 +37,36 @@ last_restart_time = None
 processor_lock = asyncio.Lock()
 
 
+def format_processing_time(time_value):
+    """Форматирует время обработки в читаемый формат: часы:минуты:секунды или минуты:секунды или секунды
+    
+    Args:
+        time_value: Время в секундах (может быть float/int) или timedelta объект
+    
+    Returns:
+        Строка с отформатированным временем
+    """
+    # Если это timedelta, преобразуем в секунды
+    if isinstance(time_value, timedelta):
+        total_seconds = int(time_value.total_seconds())
+    else:
+        total_seconds = int(time_value)
+    
+    if total_seconds < 60:
+        return f"{total_seconds} сек"
+    
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    
+    if hours > 0:
+        return f"{hours} ч {minutes} мин {secs} сек"
+    elif minutes > 0:
+        return f"{minutes} мин {secs} сек"
+    else:
+        return f"{secs} сек"
+
+
 async def handle_audio_service(message: Message):
     user_id = message.from_user.id
 
@@ -265,7 +295,7 @@ async def handle_audio_service(message: Message):
 
         # Предсказываем время обработки
         estimated_time = predict_processing_time(file_path, WHISPER_MODEL)
-        estimated_time_str = str(estimated_time)
+        estimated_time_str = format_processing_time(estimated_time)
 
         # Уведомляем пользователя о постановке в очередь
         file_size_mb = file_size / (1024 * 1024)
@@ -277,7 +307,7 @@ async def handle_audio_service(message: Message):
             model_info = f"Модель: {smaller_model} (автоматически выбрана для большого файла вместо {WHISPER_MODEL})"
             # Обновляем время с учетом фактически используемой модели
             estimated_time = predict_processing_time(file_path, smaller_model)
-            estimated_time_str = str(estimated_time)
+            estimated_time_str = format_processing_time(estimated_time)
 
         # Запускаем фоновый обработчик очереди, если он еще не запущен
         await ensure_background_processor_running()
@@ -715,7 +745,7 @@ async def background_processor():
                     # Если использованная модель отличается от заданной, добавляем информацию
                     if used_model != WHISPER_MODEL:
                         processing_time = transcription.get("processing_time", 0)
-                        processing_time_str = f" (время обработки: {processing_time:.1f} сек)" if processing_time > 0 else ""
+                        processing_time_str = f" (время обработки: {format_processing_time(processing_time)})" if processing_time > 0 else ""
                         message_text += f"ℹ️ Использована модель {used_model} вместо {WHISPER_MODEL} для оптимизации памяти{processing_time_str}.\n\n"
                 else:
                     # Если информации нет в результате, используем приблизительную проверку по размеру файла
