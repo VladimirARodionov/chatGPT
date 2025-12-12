@@ -642,9 +642,17 @@ async def background_processor():
                                 current_model = smaller_model
 
                             # Определяем тип файла для передачи в predict_processing_time
-                            is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
-                            is_video_file = is_video_file or "Видеосообщение" in file_name
-
+                            # Используем оригинальное имя файла из базы данных, чтобы правильно определить тип
+                            # даже если файл был извлечен из видео (имеет расширение .wav)
+                            is_video_file = False
+                            if file_name:
+                                file_name_lower = file_name.lower()
+                                # Проверяем расширения видео
+                                video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
+                                is_video_file = any(file_name_lower.endswith(ext) for ext in video_extensions)
+                                # Проверяем специальные названия
+                                is_video_file = is_video_file or "Видеосообщение" in file_name or "видео" in file_name_lower
+                            
                             # Получаем предполагаемое оставшееся время
                             estimated_total = predict_processing_time(file_path, current_model, is_video=is_video_file)
                             elapsed_td = timedelta(seconds=int(elapsed))
@@ -658,9 +666,8 @@ async def background_processor():
                                 percent_complete = 0
                                 progress_bar = "░" * 20
 
-                            # Определяем тип файла
-                            is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
-                            file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
+                            # Определяем тип файла для отображения (используем уже определенную переменную is_video_file)
+                            file_type_label = "видео" if is_video_file else "аудио"
                             
                             status_message = (
                                 f"Транскрибирую {file_type_label} {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
