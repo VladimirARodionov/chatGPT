@@ -755,14 +755,43 @@ def predict_processing_time(file_path, model_name):
     # Получаем размер файла в МБ
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     
-    # Определяем тип файла (видео или аудио) по расширению
+    # Определяем тип файла (видео или аудио) по расширению (первичная проверка)
     file_ext = os.path.splitext(file_path)[1].lower()
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
     is_video_file = file_ext in video_extensions
+    has_extension = bool(file_ext)
     
-    # Проверяем наличие ffprobe для получения длительности
+    # Проверяем наличие ffprobe для получения длительности и определения типа файла
     audio_duration_seconds = 0
     try:
+        # Если расширение отсутствует или файл не определен как видео по расширению,
+        # проверяем содержимое через ffprobe для точного определения типа
+        if not has_extension or not is_video_file:
+            # Проверяем, есть ли видеодорожка в файле
+            video_check_result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "json",
+                    file_path
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if video_check_result.returncode == 0:
+                try:
+                    video_check_output = json.loads(video_check_result.stdout)
+                    streams = video_check_output.get("streams", [])
+                    # Если найдена видеодорожка, это видео файл
+                    if streams and any(stream.get("codec_type") == "video" for stream in streams):
+                        is_video_file = True
+                        logger.info(f"Файл {file_path} определен как видео по содержимому (видеодорожка найдена)")
+                except (ValueError, KeyError, json.JSONDecodeError):
+                    pass
+        
         # Выполняем команду ffprobe для получения информации о длительности
         result = subprocess.run(
             [
@@ -773,7 +802,8 @@ def predict_processing_time(file_path, model_name):
                 file_path
             ],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=10
         )
         
         # Парсим результат
@@ -790,11 +820,12 @@ def predict_processing_time(file_path, model_name):
             else:
                 # Для аудио: приблизительно 1MB ~ 1 минута для аудио с битрейтом 128 kbps
                 audio_duration_seconds = file_size_mb * 60
-    except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError):
+    except (subprocess.SubprocessError, ValueError, KeyError, json.JSONDecodeError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         # Если произошла ошибка, оцениваем по размеру файла
+        logger.warning(f"Не удалось определить тип файла через ffprobe для {file_path}: {e}, используем оценку по расширению")
         if is_video_file:
             # Для видео: используем меньший коэффициент (учитывая, что большая часть размера - видеодорожка)
-            audio_duration_seconds = file_size_mb * 27  # 27 секунд на МБ для видео
+            audio_duration_seconds = file_size_mb * 20  # 20 секунд на МБ для видео
         else:
             # Для аудио: стандартная оценка
             audio_duration_seconds = file_size_mb * 60
