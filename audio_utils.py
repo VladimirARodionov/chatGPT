@@ -606,6 +606,62 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small", 
         logger.exception(f"Ошибка при транскрипции файла {file_path}: {e}")
         return None
 
+async def extract_audio_from_video(video_file, output_format="wav"):
+    """
+    Извлекает аудиодорожку из видеофайла для обработки Whisper
+    
+    Args:
+        video_file: Путь к исходному видеофайлу
+        output_format: Целевой формат аудио (по умолчанию wav)
+        
+    Returns:
+        Путь к извлеченному аудиофайлу
+        
+    Raises:
+        Exception: Если видео не содержит аудиодорожки или произошла ошибка при извлечении
+    """
+    try:
+        import ffmpeg
+        
+        # Проверяем, существует ли файл
+        if not os.path.exists(video_file):
+            raise FileNotFoundError(f"Видеофайл не найден: {video_file}")
+        
+        # Создаем временный файл
+        temp_dir = "temp_audio"
+        os.makedirs(temp_dir, exist_ok=True)
+        output_file = f"{temp_dir}/extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.{output_format}"
+        
+        # Извлекаем аудио из видео
+        # Используем параметры для оптимальной обработки Whisper:
+        # - acodec='pcm_s16le': 16-bit PCM (поддерживается Whisper)
+        # - ac=1: моно канал (уменьшает размер файла)
+        # - ar='16000': частота дискретизации 16kHz (стандарт для Whisper)
+        try:
+            (
+                ffmpeg
+                .input(video_file)
+                .output(output_file, acodec='pcm_s16le', ac=1, ar='16000')
+                .run(quiet=True, overwrite_output=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+            error_message = e.stderr.decode() if e.stderr else str(e)
+            # Проверяем, есть ли аудиодорожка в видео
+            if "Stream map" in error_message or "does not contain any stream" in error_message:
+                raise ValueError(f"Видеофайл не содержит аудиодорожки: {video_file}")
+            raise Exception(f"Ошибка FFmpeg при извлечении аудио: {error_message}")
+        
+        # Проверяем, что файл был создан и не пустой
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise Exception(f"Не удалось извлечь аудио из видео. Результирующий файл пуст или не создан.")
+        
+        logger.info(f"Аудио успешно извлечено из видео: {video_file} -> {output_file}")
+        return output_file
+        
+    except Exception as e:
+        logger.exception(f"Ошибка при извлечении аудио из видео: {e}")
+        raise
+
 async def convert_audio_format(input_file, output_format="wav"):
     """
     Конвертирует аудиофайл в нужный формат для обработки Whisper
