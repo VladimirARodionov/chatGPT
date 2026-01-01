@@ -51,14 +51,14 @@ def format_processing_time(time_value):
         total_seconds = int(time_value.total_seconds())
     else:
         total_seconds = int(time_value)
-    
+
     if total_seconds < 60:
         return f"{total_seconds} сек"
-    
+
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     secs = total_seconds % 60
-    
+
     if hours > 0:
         return f"{hours} ч {minutes} мин {secs} сек"
     elif minutes > 0:
@@ -78,31 +78,31 @@ async def handle_audio_service(message: Message):
     is_video = message.video is not None or message.video_note is not None
     is_audio = message.voice is not None or message.audio is not None
     is_document = message.document is not None
-    
+
     # Если это документ, проверяем его тип по MIME-типу или расширению
     if is_document and not (is_video or is_audio):
         mime_type = message.document.mime_type or ""
         file_name = message.document.file_name or ""
-        
+
         # Видео форматы
         video_mime_types = ["video/", "application/vnd.apple.mpegurl"]
         video_extensions = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".ogv"]
-        
+
         # Аудио форматы
         audio_mime_types = ["audio/"]
         audio_extensions = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus", ".amr"]
-        
+
         file_name_lower = file_name.lower()
-        
+
         # Проверяем, является ли документ видео
         if any(mime_type.startswith(vt) for vt in video_mime_types) or \
-           any(file_name_lower.endswith(ext) for ext in video_extensions):
+                any(file_name_lower.endswith(ext) for ext in video_extensions):
             is_video = True
         # Проверяем, является ли документ аудио
         elif any(mime_type.startswith(at) for at in audio_mime_types) or \
-             any(file_name_lower.endswith(ext) for ext in audio_extensions):
+                any(file_name_lower.endswith(ext) for ext in audio_extensions):
             is_audio = True
-    
+
     # Отправляем сообщение о начале обработки
     file_type_text = "видео" if is_video else "аудио"
     processing_msg = await message.answer(f"Загружаю и обрабатываю {file_type_text}...")
@@ -229,73 +229,24 @@ async def handle_audio_service(message: Message):
                 file_path_on_server = await get_file_path_direct(file_id, bot_token)
 
                 if not file_path_on_server:
-                    # Если Local Bot API не может получить файл (например, для пересланных файлов),
-                    # пробуем использовать стандартный API как fallback
-                    logger.warning(f"Local Bot API не смог получить файл {file_id}, пробуем стандартный API как fallback")
                     await processing_msg.edit_text(
-                        "Local Bot API не может обработать этот файл (возможно, пересланный файл). "
-                        "Пробую стандартный метод загрузки..."
+                        "⚠️ Не удалось получить информацию о файле через Local Bot API. "
+                        "Возможно, файл всё ещё слишком большой или возникла другая ошибка."
                     )
-                    
-                    try:
-                        # Пробуем получить файл через стандартный API
-                        file = await bot.get_file(file_id)
-                        download_text = f"Скачиваю {file_type_text}файл стандартным методом..."
-                        await processing_msg.edit_text(download_text)
-                        download_success = await download_voice(file, file_path)
-                        
-                        if not download_success:
-                            await processing_msg.edit_text(
-                                f"⚠️ Не удалось скачать {file_type_text}файл. "
-                                "Возможно, файл недоступен или был удален. Попробуйте отправить файл заново."
-                            )
-                            return
-                        
-                        # Получаем размер скачанного файла
-                        file_size = os.path.getsize(file_path)
-                        logger.info(f"Файл успешно скачан через стандартный API (fallback): {file_size/1024/1024:.2f} МБ")
-                    except Exception as fallback_error:
-                        logger.exception(f"Ошибка при попытке загрузки через стандартный API (fallback): {fallback_error}")
-                        await processing_msg.edit_text(
-                            "⚠️ Не удалось загрузить файл ни через Local Bot API, ни через стандартный API. "
-                            "Возможно, файл недоступен, был удален или это пересланный файл с временным file_id. "
-                            "Попробуйте отправить файл заново."
-                        )
-                        return
-                else:
-                    # Загружаем файл напрямую через Local Bot API
-                    await processing_msg.edit_text(f"Загружаю большой файл напрямую через Local Bot API...\nЭтот процесс может занять некоторое время для файлов большого размера.")
+                    return
 
-                    if not await download_large_file_direct(file_id, file_path, bot_token):
-                        # Если прямая загрузка через Local Bot API не удалась, пробуем стандартный API
-                        logger.warning(f"Не удалось загрузить файл через Local Bot API, пробуем стандартный API как fallback")
-                        await processing_msg.edit_text(
-                            "Не удалось загрузить через Local Bot API. Пробую стандартный метод..."
-                        )
-                        
-                        try:
-                            file = await bot.get_file(file_id)
-                            download_success = await download_voice(file, file_path)
-                            
-                            if not download_success:
-                                await processing_msg.edit_text(
-                                    "⚠️ Не удалось загрузить файл ни через Local Bot API, ни через стандартный API. "
-                                    "Попробуйте отправить файл заново."
-                                )
-                                return
-                            
-                            file_size = os.path.getsize(file_path)
-                            logger.info(f"Файл успешно скачан через стандартный API (fallback): {file_size/1024/1024:.2f} МБ")
-                        except Exception as fallback_error:
-                            logger.exception(f"Ошибка при попытке загрузки через стандартный API (fallback): {fallback_error}")
-                            await processing_msg.edit_text(
-                                "⚠️ Не удалось загрузить файл. Возможно, файл недоступен или был удален. "
-                                "Попробуйте отправить файл заново."
-                            )
-                            return
-                    
-                    # Получаем размер скачанного файла
-                    file_size = os.path.getsize(file_path)
+                # Загружаем файл напрямую через Local Bot API
+                await processing_msg.edit_text(f"Загружаю большой файл напрямую через Local Bot API...\nЭтот процесс может занять некоторое время для файлов большого размера.")
+
+                if not await download_large_file_direct(file_id, file_path, bot_token):
+                    await processing_msg.edit_text(
+                        "⚠️ Не удалось загрузить файл через Local Bot API. "
+                        "Возможно, файл слишком большой или возникла ошибка сервера."
+                    )
+                    return
+
+                # Получаем размер скачанного файла
+                file_size = os.path.getsize(file_path)
         except TelegramBadRequest as e:
             if "file is too big" in str(e).lower():
                 await processing_msg.edit_text(
@@ -330,7 +281,7 @@ async def handle_audio_service(message: Message):
                 await processing_msg.edit_text("Извлекаю аудиодорожку из видео...")
                 file_path = await extract_audio_from_video(file_path)
                 logger.info(f"Аудио успешно извлечено из видео: {file_path}")
-                
+
                 # Удаляем оригинальное видео после извлечения аудио (опционально, для экономии места)
                 # Можно оставить, если нужно сохранить видео
                 # try:
@@ -368,7 +319,7 @@ async def handle_audio_service(message: Message):
         # Получаем информацию о позиции в очереди
         user_queue = get_queue(user_id)
         position = len(user_queue)
-        
+
         # Получаем общий размер очереди (число незавершенных и не отмененных задач)
         position_text = ""
         if position == 1:
@@ -397,7 +348,7 @@ async def handle_audio_service(message: Message):
             f"Обработка начнется автоматически. Вы получите уведомление, когда транскрибация будет готова.\n\n"
             f"Для отмены обработки используйте команду /cancel"
         )
-        
+
         logger.info(f"{file_type_label} от пользователя {user_id} добавлен в очередь на обработку.")
 
     except TelegramBadRequest as e:
@@ -468,22 +419,22 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
                     model="whisper-1",
                     file=audio_file
                 )
-            
+
             # Проверяем результат транскрибации
             if transcription is None:
                 logger.error("OpenAI API вернул None при транскрибации")
                 raise ValueError("Транскрибация вернула пустой результат")
-            
+
             # Проверяем наличие текста в результате
             if not hasattr(transcription, 'text') or transcription.text is None:
                 logger.error("OpenAI API вернул транскрибацию без текста")
                 raise ValueError("Транскрибация не содержит текста")
-            
+
             text = transcription.text.strip()
             if not text:
                 logger.warning("Транскрибация вернула пустую строку")
                 return ""
-            
+
             return text
     except Exception as e:
         logger.exception(f"Ошибка при транскрибации: {e}")
@@ -493,17 +444,17 @@ async def transcribe_audio(file_path, condition_on_previous_text = False, use_lo
 async def background_processor():
     """Фоновый обработчик очереди аудиофайлов из базы данных"""
     global background_worker_task
-    
+
     # Используем блокировку для защиты от одновременного запуска нескольких обработчиков
     async with processor_lock:
         # Защита от параллельного запуска нескольких обработчиков
         if background_worker_task:
             logger.warning("Попытка запустить фоновый обработчик, когда он уже запущен")
             return
-            
+
         # Важно: сначала сохраняем ссылку на текущую задачу, затем устанавливаем флаг
         background_worker_task = asyncio.current_task()
-    
+
     logger.info("Запущен фоновый обработчик аудиофайлов")
 
     # Счетчик для периодической очистки файлов
@@ -518,7 +469,7 @@ async def background_processor():
     active_tasks = get_active_tasks()
     if active_tasks:
         logger.info(f"Обнаружено {len(active_tasks)} активных задач после перезапуска. Продолжаем их обработку.")
-        
+
         # Сбрасываем флаг активности у всех активных задач, чтобы они были обработаны в правильном порядке
         reset_active_tasks()
 
@@ -536,7 +487,7 @@ async def background_processor():
                 # Найдем первую задачу в очереди, которая не активна, не завершена и не отменена
                 # Для этого получим все очереди пользователей и найдем первую неактивную задачу
                 active_task = None
-                
+
                 # Получим первую задачу из базы
                 try:
                     active_task = get_first_from_queue()
@@ -545,31 +496,31 @@ async def background_processor():
                 except Exception as db_error:
                     logger.error(f"Ошибка при получении задачи из базы данных: {db_error}")
                     error_counter += 1
-                    
+
                     # Если слишком много последовательных ошибок, делаем небольшую паузу
                     if error_counter >= MAX_CONSECUTIVE_ERRORS:
                         logger.warning(f"Обнаружено {error_counter} последовательных ошибок. Делаем паузу перед следующей попыткой.")
                         await asyncio.sleep(10)  # Пауза на 10 секунд
                         error_counter = 0  # Сбрасываем счетчик после паузы
-                    
+
                     await asyncio.sleep(1)
                     continue
-                
+
                 # Если нет задач, ждем 1 секунду и проверяем снова
                 if not active_task:
                     await asyncio.sleep(1)
                     continue
-                
+
                 # Отмечаем задачу как активную
                 set_active_queue(active_task.id)
-                    
+
                 # Получаем информацию о задаче
                 user_id = active_task.user_id
                 file_path = active_task.file_path
                 file_name = active_task.file_name
                 chat_id = active_task.chat_id
                 message_id = active_task.message_id
-                
+
                 # Проверяем, существует ли файл
                 if not os.path.exists(file_path):
                     logger.error(f"Файл {file_path} не существует для задачи {active_task.id}")
@@ -579,7 +530,7 @@ async def background_processor():
                         text=f"❌ Ошибка: Файл для транскрибации не найден. Возможно, он был удален."
                     )
                     continue
-                
+
                 # Создаем объект-заглушку для сообщения, которое будем редактировать
                 # В aiogram нет метода get_message, поэтому создаем заглушку с методом edit_text
                 class MessageStub:
@@ -588,7 +539,7 @@ async def background_processor():
                         self.chat_id = chat_id
                         self.message_id = message_id
                         self.chat = type('obj', (object,), {'id': chat_id})()
-                    
+
                     async def edit_text(self, text, **kwargs):
                         """Редактирует существующее сообщение, при неудаче создает новое"""
                         try:
@@ -629,9 +580,9 @@ async def background_processor():
                         await bot.send_message(
                             chat_id=chat_id,
                             text=f"Транскрибирую аудио...\n\n"
-                                f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
-                                f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
-                                f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
+                                 f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
+                                 f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
+                                 f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
                         )
                 except Exception as e:
                     logger.exception(f"Ошибка при проверке размера файла: {e}")
@@ -645,7 +596,7 @@ async def background_processor():
                         await processing_msg.edit_text(f"❌ Ошибка: Файл для транскрибации не найден.")
                         set_finished_queue(active_task.id)
                         continue
-                        
+
                     # Создаем объект будущего результата
                     future = loop.run_in_executor(
                         thread_executor,
@@ -656,7 +607,7 @@ async def background_processor():
                     # Ожидаем результат с периодическим обновлением статуса
                     start_time = datetime.now()
                     cancelled = False
-                    
+
                     while not future.done():
                         # Проверяем, не отменена ли задача
                         with get_db_session() as session:
@@ -717,7 +668,7 @@ async def background_processor():
 
                             # Определяем тип файла для отображения (используем уже определенную переменную is_video_file)
                             file_type_label = "видео" if is_video_file else "аудио"
-                            
+
                             status_message = (
                                 f"Транскрибирую {file_type_label} {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                 f"⏱ Прошло времени: {time_str}\n"
@@ -761,7 +712,7 @@ async def background_processor():
                 # Определяем тип файла для сообщений об ошибках
                 is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
                 file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
-                
+
                 # Проверяем, получили ли мы результат
                 if transcription is None:
                     # Если транскрибация не удалась, сообщаем об ошибке
@@ -789,7 +740,7 @@ async def background_processor():
                 username = "unknown"
                 first_name = "Unknown"
                 last_name = ""
-                
+
                 # Пытаемся получить данные пользователя из БД или другим способом
                 try:
                     user = await bot.get_chat_member(chat_id, user_id)
@@ -813,7 +764,7 @@ async def background_processor():
                 is_video_file = file_name and any(ext in file_name.lower() for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'])
                 file_type_label = "видео" if is_video_file or "Видеосообщение" in file_name else "аудио"
                 emoji = "🎥" if file_type_label == "видео" else "🎤"
-                
+
                 # Формируем текстовое сообщение
                 message_text = f"{emoji} Транскрибация {file_type_label}: {file_name}\n\n"
 
@@ -848,7 +799,7 @@ async def background_processor():
                 else:
                     # Если это объект с атрибутом text
                     transcription_text = getattr(transcription, 'text', '') if transcription else ''
-                
+
                 # Убеждаемся, что transcription_text - это строка и не None
                 if transcription_text is None:
                     transcription_text = ''
@@ -876,10 +827,10 @@ async def background_processor():
                 class MessageStub:
                     def __init__(self, chat_id):
                         self.chat = type('obj', (object,), {'id': chat_id})
-                        
+
                     async def answer(self, text):
                         return await bot.send_message(chat_id=self.chat.id, text=text)
-                        
+
                     async def answer_document(self, document, caption=None):
                         return await bot.send_document(chat_id=self.chat.id, document=document, caption=caption)
 
@@ -950,7 +901,7 @@ async def background_processor():
                 logger.error(f"Обработчик продолжит работу несмотря на ошибку: {str(e)}")
                 # Увеличиваем счетчик ошибок
                 error_counter += 1
-                
+
                 # Если много последовательных ошибок, делаем более длинную паузу
                 if error_counter >= MAX_CONSECUTIVE_ERRORS:
                     logger.warning(f"Слишком много ошибок подряд ({error_counter}). Делаем паузу для стабилизации.")
@@ -959,11 +910,11 @@ async def background_processor():
                 else:
                     # Небольшая пауза после ошибки
                     await asyncio.sleep(1)
-            
+
             # Периодически логируем состояние обработчика для мониторинга
             if cleanup_counter % 50 == 0:
                 logger.info(f"Фоновый обработчик продолжает работать. Счетчик очистки: {cleanup_counter}")
-                
+
     except Exception as e:
         # Логируем любые непредвиденные ошибки вне внутреннего try-except блока
         logger.exception(f"Критическая ошибка в фоновом обработчике: {e}")
@@ -982,16 +933,16 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
         Кортеж (успех операции, сообщение для пользователя)
     """
     logger.info(f"Попытка отмены обработки аудио для пользователя {user_id}")
-    
+
     # Получаем все активные задачи пользователя
     user_queue = get_queue(user_id)
-    
+
     if not user_queue:
         logger.info(f"Для пользователя {user_id} не найдено активных задач")
         return False, "У вас нет активных задач на транскрибацию."
-    
+
     cancelled_count = 0
-    
+
     # Отменяем все активные задачи пользователя
     for task in user_queue:
         if set_cancelled_queue(task.id):
@@ -999,13 +950,13 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
             logger.info(f"Задача {task.id} для пользователя {user_id} успешно отменена")
         else:
             logger.warning(f"Не удалось отменить задачу {task.id} для пользователя {user_id}")
-    
+
     if cancelled_count > 0:
         # Формируем текст в зависимости от количества отмененных задач
         task_text = "задача" if cancelled_count == 1 else "задачи"
         if cancelled_count >= 5:
             task_text = "задач"
-        
+
         return True, f"✅ {cancelled_count} {task_text} на транскрибацию отменено."
     else:
         return False, "Не удалось отменить задачи на транскрибацию."
@@ -1014,12 +965,12 @@ async def ensure_background_processor_running():
     """Гарантирует, что фоновый процессор аудио запущен и работает корректно.
     Проверяет текущее состояние и при необходимости перезапускает процессор."""
     global background_worker_task
-    
+
     #logger.debug(f"Проверка фонового процессора: task={background_worker_task}")
-    
+
     # Флаг, указывающий на необходимость перезапуска
     need_restart = False
-    
+
     # Проверяем состояние задачи, если она существует
     if background_worker_task:
         if background_worker_task.done():
@@ -1040,11 +991,11 @@ async def ensure_background_processor_running():
         # Если задачи нет, необходим запуск
         logger.info("Фоновый процессор не запущен, требуется запуск")
         need_restart = True
-    
+
     # Если требуется перезапуск, сначала отменяем текущую задачу
     if need_restart:
         logger.info("Перезапуск фонового процессора аудио...")
-        
+
         # Отменяем текущую задачу, если она существует и еще не завершена
         if background_worker_task and not background_worker_task.done():
             try:
@@ -1056,17 +1007,17 @@ async def ensure_background_processor_running():
                     logger.debug("Задача успешно отменена или тайм-аут ожидания")
             except Exception as e:
                 logger.error(f"Ошибка при отмене предыдущей задачи: {str(e)}")
-        
+
         # Сбрасываем состояние
         background_worker_task = None
-        
+
         # Запускаем новую фоновую задачу
         background_worker_task = asyncio.create_task(background_processor())
         logger.info("Новая задача фонового процессора успешно запущена")
     else:
         #logger.debug("Фоновый процессор работает корректно, перезапуск не требуется")
         pass
-    
+
     return background_worker_task
 
 # Периодическая проверка состояния обработчика
@@ -1080,7 +1031,7 @@ async def monitor_background_processor():
             await ensure_background_processor_running()
         except Exception as e:
             logger.exception(f"Ошибка в мониторинге фонового обработчика: {e}")
-        
+
         # Проверяем каждые 5 минут
         await asyncio.sleep(300)
 
@@ -1096,6 +1047,6 @@ def init_monitoring():
         await asyncio.sleep(10)  # Задержка 10 секунд
         await asyncio.create_task(monitor_background_processor())
         logger.info("Запущен мониторинг фонового обработчика")
-        
+
     asyncio.create_task(delayed_start())
     logger.info("Мониторинг фонового обработчика будет запущен через 10 секунд")

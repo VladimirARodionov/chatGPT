@@ -516,6 +516,9 @@ async def download_large_file_direct(file_id, destination, bot_token):
     else:
         logger.warning("Не удалось получить размер файла из API, продолжаем без проверки размера")
 
+    # Пробуем найти файл локально (только одна попытка, так как для пересланных файлов он может не сохраняться локально)
+    file_found = False
+    
     # Пробуем сначала прямой доступ к файлу, если это возможно
     if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
         try:
@@ -530,7 +533,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
 
             file_size = os.path.getsize(destination)
             logger.info(f"Файл успешно скопирован локально, размер: {file_size/1024/1024:.2f} МБ")
-            return True
+            file_found = True
         except (IOError, OSError) as e:
             logger.error(f"Ошибка при локальном копировании файла: {e}")
             logger.info("Продолжаем с методом загрузки через HTTP")
@@ -561,7 +564,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
                     os.chmod(destination, 0o644)
                     file_size = os.path.getsize(destination)
                     logger.info(f"Файл успешно скопирован через sudo, размер: {file_size/1024/1024:.2f} МБ")
-                    return True
+                    file_found = True
                 else:
                     logger.error("Файл скопирован через sudo, но он пустой или не существует")
             else:
@@ -589,7 +592,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
 
                 file_size = os.path.getsize(destination)
                 logger.info(f"Файл успешно скопирован локально, размер: {file_size/1024/1024:.2f} МБ")
-                return True
+                file_found = True
             except (IOError, OSError) as e:
                 logger.error(f"Ошибка при локальном копировании файла через настраиваемый путь: {e}")
                 logger.info("Продолжаем с проверкой других путей")
@@ -617,7 +620,7 @@ async def download_large_file_direct(file_id, destination, bot_token):
                         os.chmod(destination, 0o644)
                         file_size = os.path.getsize(destination)
                         logger.info(f"Файл успешно скопирован через sudo из настраиваемого пути, размер: {file_size/1024/1024:.2f} МБ")
-                        return True
+                        file_found = True
                     else:
                         logger.error("Файл скопирован через sudo, но он пустой или не существует")
                 else:
@@ -625,16 +628,16 @@ async def download_large_file_direct(file_id, destination, bot_token):
             except Exception as e:
                 logger.exception(f"Ошибка при попытке копирования через sudo: {e}")
 
-        # Проверяем еще несколько альтернативных вариантов пути
-        alt_paths = [
-            # Попробуем несколько вариантов монтирования Docker-томов
-            file_path.replace('/var/lib/telegram-bot-api', '/data/telegram-bot-api'),
-            # Добавьте другие возможные пути здесь
-        ]
+    # Проверяем еще несколько альтернативных вариантов пути
+    alt_paths = [
+        # Попробуем несколько вариантов монтирования Docker-томов
+        file_path.replace('/var/lib/telegram-bot-api', '/data/telegram-bot-api'),
+        # Добавьте другие возможные пути здесь
+    ]
 
-        # Проверяем каждый альтернативный путь
-        for alt_path in alt_paths:
-            if os.path.isfile(alt_path):
+    # Проверяем каждый альтернативный путь
+    for alt_path in alt_paths:
+        if os.path.isfile(alt_path):
                 try:
                     logger.info(f"Файл найден по альтернативному пути, копируем: {alt_path} -> {destination}")
 
@@ -647,38 +650,58 @@ async def download_large_file_direct(file_id, destination, bot_token):
 
                     file_size = os.path.getsize(destination)
                     logger.info(f"Файл успешно скопирован локально, размер: {file_size/1024/1024:.2f} МБ")
-                    return True
+                    file_found = True
+                    break
                 except (IOError, OSError) as e:
                     logger.error(f"Ошибка при локальном копировании файла через альтернативный путь: {e}")
                     logger.info("Продолжаем с методом загрузки через HTTP")
                     break  # Если файл найден, но копирование не удалось, прекращаем попытки с альт. путями
+    
+    # Если файл был найден и скопирован, возвращаем успех
+    if file_found:
+        return True
 
     # Если локальное копирование не удалось или файл недоступен, продолжаем через HTTP
-    logger.info(f"Локальное копирование невозможно, загружаем файл через HTTP")
+    logger.info(f"Файл не найден локально, загружаем через HTTP (файл может быть пересланным и доступен только через HTTP)")
+    
+    # Получаем актуальную информацию о файле для HTTP загрузки
+    # Это важно, так как путь может измениться или файл может быть доступен только через HTTP
+    # Для пересланных файлов Local Bot API может не сохранять файлы локально, но они доступны через HTTP
+    file_info_for_http = await get_file_path_direct(file_id, bot_token, return_full_info=True)
+    if not file_info_for_http:
+        logger.error(f"Не удалось получить информацию о файле для HTTP загрузки {file_id}")
+        return False
+    
+    http_file_path = file_info_for_http.get('file_path')
+    if not http_file_path:
+        logger.error(f"Не удалось получить путь к файлу для HTTP загрузки")
+        return False
+    
+    logger.info(f"Получен путь к файлу для HTTP загрузки: {http_file_path}")
 
     # Обрабатываем путь к файлу (убираем абсолютный путь если он есть)
     # В Local Bot API путь может быть абсолютным, но в URL нужен относительный
-    if file_path.startswith('/'):
+    if http_file_path.startswith('/'):
         # Проверяем, содержит ли путь специфичную директорию Local Bot API
         bot_api_dir = f"/var/lib/telegram-bot-api/{bot_token}/"
-        if bot_api_dir in file_path:
+        if bot_api_dir in http_file_path:
             # Извлекаем только часть пути после токена бота
-            file_path = file_path.split(bot_api_dir)[1]
+            http_file_path = http_file_path.split(bot_api_dir)[1]
         else:
             # Просто убираем начальный слеш для формирования корректного URL
-            file_path = file_path.lstrip('/')
+            http_file_path = http_file_path.lstrip('/')
 
     # Формируем URL для загрузки файла напрямую
-    url = f"{LOCAL_BOT_API}/file/bot{bot_token}/{file_path}"
+    url = f"{LOCAL_BOT_API}/file/bot{bot_token}/{http_file_path}"
 
     logger.info(f"Начинаем загрузку файла напрямую через HTTP: {url}")
-    local_max_file_size = 100 * 1024 * 1024  # 100 МБ максимум для загрузки через HTTP
+    # Увеличиваем лимит для HTTP загрузки до MAX_FILE_SIZE
+    local_max_file_size = MAX_FILE_SIZE
 
     try:
-        # Получаем размер файла и верхнее ограничение из API getFile
-        file_info = await get_file_path_direct(file_id, bot_token, return_full_info=True)
-        if file_info and 'file_size' in file_info:
-            file_size = file_info['file_size']
+        # Используем информацию о файле, полученную ранее
+        if file_info_for_http and 'file_size' in file_info_for_http:
+            file_size = file_info_for_http['file_size']
             logger.info(f"Размер загружаемого файла (из API): {file_size/1024/1024:.2f} МБ")
 
             # Проверяем размер файла
@@ -724,8 +747,8 @@ async def download_large_file_direct(file_id, destination, bot_token):
                     return False
 
                 # Проверяем, что размер файла совпадает с ожидаемым, если известен размер из API
-                if file_info and 'file_size' in file_info:
-                    expected_size = file_info['file_size']
+                if file_info_for_http and 'file_size' in file_info_for_http:
+                    expected_size = file_info_for_http['file_size']
                     actual_size = os.path.getsize(destination)
                     if expected_size != actual_size:
                         logger.error(f"Размер загруженного файла ({actual_size}) не соответствует ожидаемому из API ({expected_size})")
