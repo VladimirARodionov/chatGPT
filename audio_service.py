@@ -229,24 +229,73 @@ async def handle_audio_service(message: Message):
                 file_path_on_server = await get_file_path_direct(file_id, bot_token)
 
                 if not file_path_on_server:
+                    # Если Local Bot API не может получить файл (например, для пересланных файлов),
+                    # пробуем использовать стандартный API как fallback
+                    logger.warning(f"Local Bot API не смог получить файл {file_id}, пробуем стандартный API как fallback")
                     await processing_msg.edit_text(
-                        "⚠️ Не удалось получить информацию о файле через Local Bot API. "
-                        "Возможно, файл всё ещё слишком большой или возникла другая ошибка."
+                        "Local Bot API не может обработать этот файл (возможно, пересланный файл). "
+                        "Пробую стандартный метод загрузки..."
                     )
-                    return
+                    
+                    try:
+                        # Пробуем получить файл через стандартный API
+                        file = await bot.get_file(file_id)
+                        download_text = f"Скачиваю {file_type_text}файл стандартным методом..."
+                        await processing_msg.edit_text(download_text)
+                        download_success = await download_voice(file, file_path)
+                        
+                        if not download_success:
+                            await processing_msg.edit_text(
+                                f"⚠️ Не удалось скачать {file_type_text}файл. "
+                                "Возможно, файл недоступен или был удален. Попробуйте отправить файл заново."
+                            )
+                            return
+                        
+                        # Получаем размер скачанного файла
+                        file_size = os.path.getsize(file_path)
+                        logger.info(f"Файл успешно скачан через стандартный API (fallback): {file_size/1024/1024:.2f} МБ")
+                    except Exception as fallback_error:
+                        logger.exception(f"Ошибка при попытке загрузки через стандартный API (fallback): {fallback_error}")
+                        await processing_msg.edit_text(
+                            "⚠️ Не удалось загрузить файл ни через Local Bot API, ни через стандартный API. "
+                            "Возможно, файл недоступен, был удален или это пересланный файл с временным file_id. "
+                            "Попробуйте отправить файл заново."
+                        )
+                        return
+                else:
+                    # Загружаем файл напрямую через Local Bot API
+                    await processing_msg.edit_text(f"Загружаю большой файл напрямую через Local Bot API...\nЭтот процесс может занять некоторое время для файлов большого размера.")
 
-                # Загружаем файл напрямую через Local Bot API
-                await processing_msg.edit_text(f"Загружаю большой файл напрямую через Local Bot API...\nЭтот процесс может занять некоторое время для файлов большого размера.")
-
-                if not await download_large_file_direct(file_id, file_path, bot_token):
-                    await processing_msg.edit_text(
-                        "⚠️ Не удалось загрузить файл через Local Bot API. "
-                        "Возможно, файл слишком большой или возникла ошибка сервера."
-                    )
-                    return
-
-                # Получаем размер скачанного файла
-                file_size = os.path.getsize(file_path)
+                    if not await download_large_file_direct(file_id, file_path, bot_token):
+                        # Если прямая загрузка через Local Bot API не удалась, пробуем стандартный API
+                        logger.warning(f"Не удалось загрузить файл через Local Bot API, пробуем стандартный API как fallback")
+                        await processing_msg.edit_text(
+                            "Не удалось загрузить через Local Bot API. Пробую стандартный метод..."
+                        )
+                        
+                        try:
+                            file = await bot.get_file(file_id)
+                            download_success = await download_voice(file, file_path)
+                            
+                            if not download_success:
+                                await processing_msg.edit_text(
+                                    "⚠️ Не удалось загрузить файл ни через Local Bot API, ни через стандартный API. "
+                                    "Попробуйте отправить файл заново."
+                                )
+                                return
+                            
+                            file_size = os.path.getsize(file_path)
+                            logger.info(f"Файл успешно скачан через стандартный API (fallback): {file_size/1024/1024:.2f} МБ")
+                        except Exception as fallback_error:
+                            logger.exception(f"Ошибка при попытке загрузки через стандартный API (fallback): {fallback_error}")
+                            await processing_msg.edit_text(
+                                "⚠️ Не удалось загрузить файл. Возможно, файл недоступен или был удален. "
+                                "Попробуйте отправить файл заново."
+                            )
+                            return
+                    
+                    # Получаем размер скачанного файла
+                    file_size = os.path.getsize(file_path)
         except TelegramBadRequest as e:
             if "file is too big" in str(e).lower():
                 await processing_msg.edit_text(
@@ -652,7 +701,7 @@ async def background_processor():
                                 is_video_file = any(file_name_lower.endswith(ext) for ext in video_extensions)
                                 # Проверяем специальные названия
                                 is_video_file = is_video_file or "Видеосообщение" in file_name or "видео" in file_name_lower
-                            
+
                             # Получаем предполагаемое оставшееся время
                             estimated_total = predict_processing_time(file_path, current_model, is_video=is_video_file)
                             elapsed_td = timedelta(seconds=int(elapsed))
