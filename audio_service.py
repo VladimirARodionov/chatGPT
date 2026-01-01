@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from audio_utils import predict_processing_time, should_use_smaller_model, convert_audio_format, \
     transcribe_with_whisper, should_condition_on_previous_text, extract_audio_from_video
-from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, \
-    LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT
+from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, DOWNLOADS_DIR, \
+    LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT, superusers
 from db_service import check_message_limit, get_queue, add_to_queue, set_active_queue, set_finished_queue, \
     set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks
 from files_service import cleanup_temp_files, save_transcription_to_file, download_voice, \
@@ -145,6 +145,7 @@ async def handle_audio_service(message: Message):
             file_name = "Видеосообщение"
 
         # Определяем расширение файла для сохранения
+        # Сохраняем файлы в папку downloads для загрузки и транскрибации
         if is_video:
             # Для видео сохраняем в исходном формате, затем извлечем аудио
             file_ext = "mp4"  # По умолчанию для видео
@@ -152,15 +153,15 @@ async def handle_audio_service(message: Message):
                 file_ext = os.path.splitext(message.video.file_name)[1][1:] or "mp4"
             elif message.document and message.document.file_name:
                 file_ext = os.path.splitext(message.document.file_name)[1][1:] or "mp4"
-            file_path = f"{TEMP_AUDIO_DIR}/video_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+            file_path = f"{DOWNLOADS_DIR}/video_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
         else:
             # Путь для сохранения аудио
             if message.document and message.document.file_name:
                 # Сохраняем с оригинальным расширением для документов
                 file_ext = os.path.splitext(message.document.file_name)[1][1:] or "ogg"
-                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+                file_path = f"{DOWNLOADS_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
             else:
-                file_path = f"{TEMP_AUDIO_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
+                file_path = f"{DOWNLOADS_DIR}/audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
 
         # Получаем информацию о файле и скачиваем его
         is_large_file = False
@@ -521,27 +522,68 @@ async def background_processor():
                 chat_id = active_task.chat_id
                 message_id = active_task.message_id
                 
+                # Проверяем, является ли это файлом из папки downloads
+                is_downloads_file = (user_id == DOWNLOADS_USER_ID and chat_id == 0 and message_id == 0)
+                
                 # Проверяем, существует ли файл
                 if not os.path.exists(file_path):
                     logger.error(f"Файл {file_path} не существует для задачи {active_task.id}")
                     set_finished_queue(active_task.id)
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"❌ Ошибка: Файл для транскрибации не найден. Возможно, он был удален."
-                    )
+                    if not is_downloads_file:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"❌ Ошибка: Файл для транскрибации не найден. Возможно, он был удален."
+                        )
                     continue
                 
                 # Создаем объект-заглушку для сообщения, которое будем редактировать
                 # В aiogram нет метода get_message, поэтому создаем заглушку с методом edit_text
                 class MessageStub:
-                    def __init__(self, bot, chat_id, message_id):
+                    def __init__(self, bot, chat_id, message_id, is_downloads_file=False):
                         self.bot = bot
                         self.chat_id = chat_id
                         self.message_id = message_id
                         self.chat = type('obj', (object,), {'id': chat_id})()
+                        self.is_downloads_file = is_downloads_file
+                        # Для файлов из downloads храним словарь message_id для каждого superuser
+                        self.superuser_messages = {} if is_downloads_file else None
                     
                     async def edit_text(self, text, **kwargs):
                         """Редактирует существующее сообщение, при неудаче создает новое"""
+                        if self.is_downloads_file:
+                            # Для файлов из downloads отправляем сообщения всем superusers
+                            logger.info(f"[Downloads] {text}")
+                            for superuser_id in superusers:
+                                try:
+                                    if superuser_id in self.superuser_messages:
+                                        # Пытаемся отредактировать существующее сообщение
+                                        try:
+                                            await self.bot.edit_message_text(
+                                                chat_id=superuser_id,
+                                                message_id=self.superuser_messages[superuser_id],
+                                                text=text,
+                                                **kwargs
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"Не удалось отредактировать сообщение {self.superuser_messages[superuser_id]} для superuser {superuser_id}: {e}")
+                                            # Если редактирование не удалось, отправляем новое сообщение
+                                            new_msg = await self.bot.send_message(
+                                                chat_id=superuser_id,
+                                                text=text,
+                                                **kwargs
+                                            )
+                                            self.superuser_messages[superuser_id] = new_msg.message_id
+                                    else:
+                                        # Отправляем новое сообщение
+                                        new_msg = await self.bot.send_message(
+                                            chat_id=superuser_id,
+                                            text=text,
+                                            **kwargs
+                                        )
+                                        self.superuser_messages[superuser_id] = new_msg.message_id
+                                except Exception as e:
+                                    logger.error(f"Ошибка при отправке сообщения superuser {superuser_id}: {e}")
+                            return
                         try:
                             await self.bot.edit_message_text(
                                 chat_id=self.chat_id,
@@ -562,10 +604,17 @@ async def background_processor():
                 # Создаем заглушку для сохраненного сообщения
                 # При первом вызове edit_text она попытается отредактировать сообщение,
                 # а если не получится - создаст новое
-                processing_msg = MessageStub(bot, chat_id, message_id)
+                processing_msg = MessageStub(bot, chat_id, message_id, is_downloads_file=is_downloads_file)
 
                 # Сообщаем о начале транскрибации
+                start_message = (
+                    f"📥 Начинаю транскрибацию файла из папки downloads:\n"
+                    f"📁 Файл: {file_name}\n\n"
+                    f"Транскрибирую {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
+                    f"Это может занять некоторое время в зависимости от длины аудио."
+                )
                 await processing_msg.edit_text(
+                    start_message if is_downloads_file else
                     f"Транскрибирую аудио {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                     f"Это может занять некоторое время в зависимости от длины аудио. Вы можете продолжать использовать бота.\n\n"
                     f"Чтобы отменить обработку, используйте команду /cancel"
@@ -577,13 +626,22 @@ async def background_processor():
                     should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
 
                     if should_switch:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=f"Транскрибирую аудио...\n\n"
-                                f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
-                                f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
-                                f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
+                        switch_message = (
+                            f"Транскрибирую аудио...\n\n"
+                            f"⚠️ Обратите внимание: Файл имеет большой размер ({file_size_mb:.1f} МБ), "
+                            f"поэтому вместо модели {WHISPER_MODEL} будет использована модель {smaller_model} для оптимизации памяти.\n\n"
+                            f"Это может повлиять на качество транскрибации, но позволит обработать большой файл без ошибок."
                         )
+                        if is_downloads_file:
+                            logger.info(f"[Downloads] Файл имеет большой размер ({file_size_mb:.1f} МБ), будет использована модель {smaller_model}")
+                            # Отправляем сообщение всем superusers
+                            for superuser_id in superusers:
+                                try:
+                                    await bot.send_message(chat_id=superuser_id, text=switch_message)
+                                except Exception as e:
+                                    logger.error(f"Ошибка при отправке сообщения superuser {superuser_id}: {e}")
+                        else:
+                            await bot.send_message(chat_id=chat_id, text=switch_message)
                 except Exception as e:
                     logger.exception(f"Ошибка при проверке размера файла: {e}")
 
@@ -593,7 +651,11 @@ async def background_processor():
                     # Перед созданием future, убедимся, что файл существует
                     if not os.path.exists(file_path):
                         logger.error(f"Файл не существует перед запуском транскрибации: {file_path}")
-                        await processing_msg.edit_text(f"❌ Ошибка: Файл для транскрибации не найден.")
+                        error_msg = (
+                            f"❌ Ошибка: Файл для транскрибации не найден.\n"
+                            f"📁 Файл: {file_name}"
+                        ) if is_downloads_file else f"❌ Ошибка: Файл для транскрибации не найден."
+                        await processing_msg.edit_text(error_msg)
                         set_finished_queue(active_task.id)
                         continue
                         
@@ -625,7 +687,10 @@ async def background_processor():
                                     logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
 
                                 # Сообщаем пользователю об отмене
-                                await processing_msg.edit_text("❌ Обработка была отменена.")
+                                cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                                await processing_msg.edit_text(cancel_message)
+                                if is_downloads_file:
+                                    logger.info(f"[Downloads] Обработка файла {file_name} была отменена")
                                 break
 
                         # Обновляем сообщение о статусе каждые 30 секунд
@@ -670,6 +735,14 @@ async def background_processor():
                             file_type_label = "видео" if is_video_file else "аудио"
                             
                             status_message = (
+                                f"📥 Транскрибирую {file_type_label} из downloads:\n"
+                                f"📁 Файл: {file_name}\n\n"
+                                f"{'С помощью локального Whisper' if USE_LOCAL_WHISPER else 'Через OpenAI API'}...\n\n"
+                                f"⏱ Прошло времени: {time_str}\n"
+                                f"⌛ Осталось примерно: {str(remaining)}\n"
+                                f"📊 Прогресс: {progress_bar} {percent_complete}%\n"
+                                f"🎯 Модель: {current_model}"
+                            ) if is_downloads_file else (
                                 f"Транскрибирую {file_type_label} {'с помощью локального Whisper' if USE_LOCAL_WHISPER else 'через OpenAI API'}...\n\n"
                                 f"⏱ Прошло времени: {time_str}\n"
                                 f"⌛ Осталось примерно: {str(remaining)}\n"
@@ -679,8 +752,9 @@ async def background_processor():
                                 f"Вы можете продолжать использовать бота для других задач.\n\n"
                                 f"Для отмены обработки используйте команду /cancel"
                             )
-
                             await processing_msg.edit_text(status_message)
+                            if is_downloads_file:
+                                logger.info(f"[Downloads] Транскрибация {file_name}: {percent_complete}% ({time_str} прошло, {str(remaining)} осталось)")
 
                         # Небольшая пауза, чтобы не нагружать процессор
                         await asyncio.sleep(1)
@@ -694,18 +768,35 @@ async def background_processor():
                         transcription = await future
                     except asyncio.CancelledError:
                         logger.info(f"Транскрибация для пользователя {user_id} отменена")
-                        await processing_msg.edit_text("❌ Обработка была отменена.")
+                        cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                        await processing_msg.edit_text(cancel_message)
+                        if is_downloads_file:
+                            logger.info(f"[Downloads] Обработка файла {file_name} была отменена")
                         set_cancelled_queue(active_task.id)
                         continue
                     except Exception as transcribe_error:
                         logger.exception(f"Ошибка при получении результата транскрибации: {transcribe_error}")
-                        await processing_msg.edit_text(f"❌ Произошла ошибка при транскрибации: {str(transcribe_error)}")
+                        error_message = (
+                            f"❌ Произошла ошибка при транскрибации файла {file_name}:\n{str(transcribe_error)}"
+                            if is_downloads_file else
+                            f"❌ Произошла ошибка при транскрибации: {str(transcribe_error)}"
+                        )
+                        await processing_msg.edit_text(error_message)
+                        if is_downloads_file:
+                            logger.error(f"[Downloads] Ошибка при транскрибации файла {file_name}: {transcribe_error}")
                         set_finished_queue(active_task.id)
                         continue
 
                 except Exception as e:
                     logger.exception(f"Ошибка при асинхронной транскрибации: {e}")
-                    await processing_msg.edit_text(f"❌ Произошла ошибка при транскрибации: {str(e)}")
+                    error_message = (
+                        f"❌ Произошла ошибка при транскрибации файла {file_name}:\n{str(e)}"
+                        if is_downloads_file else
+                        f"❌ Произошла ошибка при транскрибации: {str(e)}"
+                    )
+                    await processing_msg.edit_text(error_message)
+                    if is_downloads_file:
+                        logger.error(f"[Downloads] Ошибка при транскрибации файла {file_name}: {e}")
                     set_finished_queue(active_task.id)
                     continue
 
@@ -716,7 +807,14 @@ async def background_processor():
                 # Проверяем, получили ли мы результат
                 if transcription is None:
                     # Если транскрибация не удалась, сообщаем об ошибке
-                    await processing_msg.edit_text(
+                    error_msg = (
+                        f"❌ Ошибка при транскрибации {file_type_label} из downloads:\n"
+                        f"📁 Файл: {file_name}\n\n"
+                        f"Не удалось обработать {file_type_label}файл. Возможные причины:\n"
+                        f"• Файл повреждён или имеет неподдерживаемый формат\n"
+                        f"• {file_type_label.capitalize()} не содержит речи или имеет слишком низкое качество\n"
+                        f"• Ошибка при обработке модели Whisper"
+                    ) if is_downloads_file else (
                         f"❌ Ошибка при транскрибации {file_type_label}: {file_name}\n\n"
                         f"Не удалось обработать {file_type_label}файл. Возможные причины:\n"
                         f"• Файл повреждён или имеет неподдерживаемый формат\n"
@@ -724,6 +822,9 @@ async def background_processor():
                         f"• Ошибка при обработке модели Whisper\n\n"
                         f"Пожалуйста, попробуйте отправить другой {file_type_label}файл или обратитесь к администратору."
                     )
+                    await processing_msg.edit_text(error_msg)
+                    if is_downloads_file:
+                        logger.error(f"[Downloads] {error_msg}")
 
                     # Удаляем временные файлы
                     try:
@@ -737,19 +838,20 @@ async def background_processor():
 
                 # Сохраняем транскрибацию в файл
                 # Получаем данные пользователя для транскрибации
-                username = "unknown"
-                first_name = "Unknown"
+                username = "downloads" if is_downloads_file else "unknown"
+                first_name = "Downloads" if is_downloads_file else "Unknown"
                 last_name = ""
                 
-                # Пытаемся получить данные пользователя из БД или другим способом
-                try:
-                    user = await bot.get_chat_member(chat_id, user_id)
-                    if user and user.user:
-                        username = user.user.username or "unknown"
-                        first_name = user.user.first_name or "Unknown"
-                        last_name = user.user.last_name or ""
-                except Exception as e:
-                    logger.warning(f"Не удалось получить данные пользователя: {e}")
+                # Пытаемся получить данные пользователя из БД или другим способом (только для файлов не из downloads)
+                if not is_downloads_file:
+                    try:
+                        user = await bot.get_chat_member(chat_id, user_id)
+                        if user and user.user:
+                            username = user.user.username or "unknown"
+                            first_name = user.user.first_name or "Unknown"
+                            last_name = user.user.last_name or ""
+                    except Exception as e:
+                        logger.warning(f"Не удалось получить данные пользователя: {e}")
 
                 transcript_file_path = save_transcription_to_file(
                     transcription,
@@ -808,10 +910,17 @@ async def background_processor():
 
                 # Проверяем, не пустой ли текст транскрибации
                 if not transcription_text:
-                    await processing_msg.edit_text(
+                    warning_msg = (
+                        f"⚠️ Предупреждение: Транскрибация {file_type_label} из downloads не содержит текста.\n"
+                        f"📁 Файл: {file_name}\n\n"
+                        f"Возможно, {file_type_label} не содержит распознаваемой речи или имеет слишком низкое качество."
+                    ) if is_downloads_file else (
                         f"⚠️ Предупреждение: Транскрибация {file_type_label} не содержит текста.\n\n"
                         f"Возможно, {file_type_label} не содержит распознаваемой речи или имеет слишком низкое качество."
                     )
+                    await processing_msg.edit_text(warning_msg)
+                    if is_downloads_file:
+                        logger.warning(f"[Downloads] {warning_msg}")
 
                     # Удаляем временные файлы
                     try:
@@ -823,61 +932,141 @@ async def background_processor():
                     set_finished_queue(active_task.id)
                     continue
 
-                # Создаем объект сообщения для отправки файлов
-                class MessageStub:
-                    def __init__(self, chat_id):
-                        self.chat = type('obj', (object,), {'id': chat_id})
-                        
-                    async def answer(self, text):
-                        return await bot.send_message(chat_id=self.chat.id, text=text)
-                        
-                    async def answer_document(self, document, caption=None):
-                        return await bot.send_document(chat_id=self.chat.id, document=document, caption=caption)
-
-                message_stub = MessageStub(chat_id)
-
-                # Если текст слишком длинный, разбиваем на части
-                if len(transcription_text) > MAX_MESSAGE_LENGTH - len(message_text):
-                    # Отправляем превью транскрибации
-                    preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
-                    preview_text = transcription_text[:preview_length] + "...\n\n(полный текст в файле)"
-                    await processing_msg.edit_text(message_text + preview_text)
-
-                    # Отправляем файл с полной транскрибацией безопасным способом
-                    caption_text = f"Полная транскрибация {file_type_label}"
-                    await send_file_safely(
-                        message_stub,
-                        transcript_file_path,
-                        caption=caption_text
+                # Отправляем результаты транскрибации
+                if is_downloads_file:
+                    # Для файлов из downloads отправляем результаты всем superusers
+                    logger.info(f"[Downloads] Транскрибация файла {file_name} завершена успешно")
+                    logger.info(f"[Downloads] Транскрибация сохранена в: {transcript_file_path}")
+                    
+                    # Обновляем финальное сообщение о завершении
+                    final_message = (
+                        f"✅ Транскрибация завершена!\n\n"
+                        f"📥 Файл из downloads:\n"
+                        f"📁 {file_name}\n\n"
+                        f"{message_text}"
                     )
+                    await processing_msg.edit_text(final_message)
+                    
+                    # Отправляем результаты всем superusers
+                    for superuser_id in superusers:
+                        try:
+                            # Создаем объект сообщения для отправки файлов
+                            class SuperuserMessageStub:
+                                def __init__(self, chat_id):
+                                    self.chat = type('obj', (object,), {'id': chat_id})
+                                    
+                                async def answer(self, text):
+                                    return await bot.send_message(chat_id=self.chat.id, text=text)
+                                    
+                                async def answer_document(self, document, caption=None):
+                                    return await bot.send_document(chat_id=self.chat.id, document=document, caption=caption)
 
-                    # Проверяем наличие SRT-файла и отправляем его
+                            message_stub = SuperuserMessageStub(superuser_id)
+                            
+                            # Если текст слишком длинный, разбиваем на части
+                            if len(transcription_text) > MAX_MESSAGE_LENGTH - len(message_text):
+                                # Отправляем превью транскрибации
+                                preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
+                                preview_text = transcription_text[:preview_length] + "...\n\n(полный текст в файле)"
+                                await bot.send_message(chat_id=superuser_id, text=message_text + preview_text)
+
+                                # Отправляем файл с полной транскрибацией безопасным способом
+                                caption_text = f"Полная транскрибация {file_type_label} из downloads"
+                                await send_file_safely(
+                                    message_stub,
+                                    transcript_file_path,
+                                    caption=caption_text
+                                )
+
+                                # Проверяем наличие SRT-файла и отправляем его
+                                srt_file_path = transcript_file_path.replace('.txt', '.srt')
+                                if os.path.exists(srt_file_path):
+                                    await send_file_safely(
+                                        message_stub,
+                                        srt_file_path,
+                                        caption="Файл субтитров (SRT) для видеоредакторов"
+                                    )
+                            else:
+                                # Для коротких транскрибаций просто отправляем весь текст
+                                await bot.send_message(chat_id=superuser_id, text=message_text + transcription_text)
+
+                                # Отправляем файл для удобства
+                                await send_file_safely(
+                                    message_stub,
+                                    transcript_file_path,
+                                    caption="Транскрибация аудио в виде файла"
+                                )
+
+                                # Проверяем наличие SRT-файла и отправляем его
+                                srt_file_path = transcript_file_path.replace('.txt', '.srt')
+                                if os.path.exists(srt_file_path):
+                                    await send_file_safely(
+                                        message_stub,
+                                        srt_file_path,
+                                        caption="Файл субтитров (SRT) для видеоредакторов"
+                                    )
+                        except Exception as e:
+                            logger.error(f"Ошибка при отправке результатов superuser {superuser_id}: {e}")
+                    
                     srt_file_path = transcript_file_path.replace('.txt', '.srt')
                     if os.path.exists(srt_file_path):
-                        await send_file_safely(
-                            message_stub,
-                            srt_file_path,
-                            caption="Файл субтитров (SRT) для видеоредакторов"
-                        )
+                        logger.info(f"[Downloads] Файл субтитров сохранен в: {srt_file_path}")
                 else:
-                    # Для коротких транскрибаций просто отправляем весь текст
-                    await processing_msg.edit_text(message_text + transcription_text)
+                    # Создаем объект сообщения для отправки файлов
+                    class MessageStub:
+                        def __init__(self, chat_id):
+                            self.chat = type('obj', (object,), {'id': chat_id})
+                            
+                        async def answer(self, text):
+                            return await bot.send_message(chat_id=self.chat.id, text=text)
+                            
+                        async def answer_document(self, document, caption=None):
+                            return await bot.send_document(chat_id=self.chat.id, document=document, caption=caption)
 
-                    # Отправляем файл для удобства
-                    await send_file_safely(
-                        message_stub,
-                        transcript_file_path,
-                        caption="Транскрибация аудио в виде файла"
-                    )
+                    message_stub = MessageStub(chat_id)
 
-                    # Проверяем наличие SRT-файла и отправляем его
-                    srt_file_path = transcript_file_path.replace('.txt', '.srt')
-                    if os.path.exists(srt_file_path):
+                    # Если текст слишком длинный, разбиваем на части
+                    if len(transcription_text) > MAX_MESSAGE_LENGTH - len(message_text):
+                        # Отправляем превью транскрибации
+                        preview_length = MAX_MESSAGE_LENGTH - len(message_text) - 50  # Оставляем запас
+                        preview_text = transcription_text[:preview_length] + "...\n\n(полный текст в файле)"
+                        await processing_msg.edit_text(message_text + preview_text)
+
+                        # Отправляем файл с полной транскрибацией безопасным способом
+                        caption_text = f"Полная транскрибация {file_type_label}"
                         await send_file_safely(
                             message_stub,
-                            srt_file_path,
-                            caption="Файл субтитров (SRT) для видеоредакторов"
+                            transcript_file_path,
+                            caption=caption_text
                         )
+
+                        # Проверяем наличие SRT-файла и отправляем его
+                        srt_file_path = transcript_file_path.replace('.txt', '.srt')
+                        if os.path.exists(srt_file_path):
+                            await send_file_safely(
+                                message_stub,
+                                srt_file_path,
+                                caption="Файл субтитров (SRT) для видеоредакторов"
+                            )
+                    else:
+                        # Для коротких транскрибаций просто отправляем весь текст
+                        await processing_msg.edit_text(message_text + transcription_text)
+
+                        # Отправляем файл для удобства
+                        await send_file_safely(
+                            message_stub,
+                            transcript_file_path,
+                            caption="Транскрибация аудио в виде файла"
+                        )
+
+                        # Проверяем наличие SRT-файла и отправляем его
+                        srt_file_path = transcript_file_path.replace('.txt', '.srt')
+                        if os.path.exists(srt_file_path):
+                            await send_file_safely(
+                                message_stub,
+                                srt_file_path,
+                                caption="Файл субтитров (SRT) для видеоредакторов"
+                            )
 
                 # Удаляем временные файлы
                 try:
@@ -1050,3 +1239,201 @@ def init_monitoring():
         
     asyncio.create_task(delayed_start())
     logger.info("Мониторинг фонового обработчика будет запущен через 10 секунд")
+
+# Специальный user_id для файлов из папки downloads
+DOWNLOADS_USER_ID = 0
+
+# Множество для отслеживания уже обработанных файлов из downloads
+processed_downloads_files = set()
+
+# Словарь для отслеживания файлов, которые еще загружаются (путь -> размер)
+files_being_uploaded = {}
+
+async def is_file_fully_uploaded(file_path: str, check_interval: float = 2.0, stability_checks: int = 3) -> bool:
+    """
+    Проверяет, что файл полностью загружен, проверяя стабильность его размера
+    
+    Args:
+        file_path: Путь к файлу
+        check_interval: Интервал между проверками размера (в секундах)
+        stability_checks: Количество проверок, при которых размер должен оставаться неизменным
+    
+    Returns:
+        True если файл полностью загружен, False если еще загружается
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False
+        
+        # Получаем начальный размер
+        initial_size = os.path.getsize(file_path)
+        
+        # Если файл пустой, считаем что он еще не начал загружаться
+        if initial_size == 0:
+            return False
+        
+        # Проверяем, что файл доступен для чтения (не заблокирован)
+        try:
+            with open(file_path, 'rb') as f:
+                f.read(1)  # Пытаемся прочитать хотя бы один байт
+        except (IOError, OSError, PermissionError) as e:
+            logger.debug(f"Файл {file_path} заблокирован для чтения: {e}")
+            return False
+        
+        # Проверяем стабильность размера несколько раз
+        for i in range(stability_checks):
+            await asyncio.sleep(check_interval)
+            
+            if not os.path.exists(file_path):
+                return False
+            
+            current_size = os.path.getsize(file_path)
+            
+            # Если размер изменился, файл еще загружается
+            if current_size != initial_size:
+                logger.debug(f"Файл {os.path.basename(file_path)} еще загружается: размер изменился с {initial_size} на {current_size} байт")
+                return False
+        
+        # Если размер оставался неизменным во всех проверках, файл загружен
+        logger.debug(f"Файл {os.path.basename(file_path)} полностью загружен, размер: {initial_size} байт")
+        return True
+        
+    except Exception as e:
+        logger.exception(f"Ошибка при проверке загрузки файла {file_path}: {e}")
+        return False
+
+async def monitor_downloads_folder():
+    """
+    Мониторит папку downloads и автоматически добавляет новые файлы в очередь транскрибации
+    """
+    logger.info(f"Запущен мониторинг папки downloads: {DOWNLOADS_DIR}")
+    
+    while True:
+        try:
+            # Проверяем папку downloads на наличие новых файлов
+            if not os.path.exists(DOWNLOADS_DIR):
+                os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+                await asyncio.sleep(30)  # Проверяем каждые 30 секунд
+                continue
+            
+            # Получаем список файлов в папке downloads
+            files = [f for f in os.listdir(DOWNLOADS_DIR) if os.path.isfile(os.path.join(DOWNLOADS_DIR, f))]
+            
+            # Расширения для видео
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv']
+            # Расширения для аудио
+            audio_extensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.wma', '.opus', '.amr', '.amr']
+            
+            for filename in files:
+                file_path = os.path.join(DOWNLOADS_DIR, filename)
+                
+                # Пропускаем уже обработанные файлы
+                if file_path in processed_downloads_files:
+                    continue
+                
+                # Определяем тип файла по расширению
+                file_ext = os.path.splitext(filename)[1].lower()
+                is_video = file_ext in video_extensions
+                is_audio = file_ext in audio_extensions
+                
+                # Пропускаем файлы, которые не являются аудио или видео
+                if not (is_video or is_audio):
+                    continue
+                
+                # Проверяем, загружен ли файл полностью
+                # Если файл уже отслеживается как загружающийся, проверяем его снова
+                if file_path in files_being_uploaded:
+                    # Проверяем, завершилась ли загрузка
+                    if await is_file_fully_uploaded(file_path):
+                        # Файл загружен, удаляем из списка загружающихся
+                        del files_being_uploaded[file_path]
+                        # Продолжаем обработку ниже
+                    else:
+                        # Файл еще загружается, пропускаем на этот раз
+                        logger.debug(f"Файл {filename} еще загружается, пропускаем на этот раз")
+                        continue
+                else:
+                    # Новый файл, проверяем загружен ли он
+                    if not await is_file_fully_uploaded(file_path):
+                        # Файл еще загружается, добавляем в список отслеживания
+                        files_being_uploaded[file_path] = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                        logger.debug(f"Файл {filename} обнаружен, но еще загружается. Добавлен в список отслеживания.")
+                        continue
+                
+                # Проверяем размер файла
+                try:
+                    file_size = os.path.getsize(file_path)
+                    file_size_mb = file_size / (1024 * 1024)
+                    
+                    if file_size == 0:
+                        logger.warning(f"Пропускаем пустой файл: {filename}")
+                        processed_downloads_files.add(file_path)  # Помечаем как обработанный
+                        continue
+                    
+                    if file_size > MAX_FILE_SIZE:
+                        logger.warning(f"Файл слишком большой для обработки: {filename} ({file_size_mb:.2f} МБ)")
+                        processed_downloads_files.add(file_path)  # Помечаем как обработанный, чтобы не проверять снова
+                        continue
+                    
+                    # Определяем тип файла для сообщения
+                    file_type = "видео" if is_video else "аудио"
+                    logger.info(f"Обнаружен новый {file_type} файл в downloads (полностью загружен): {filename} ({file_size_mb:.2f} МБ)")
+                    
+                    # Предсказываем время обработки
+                    estimated_time = predict_processing_time(file_path, WHISPER_MODEL, is_video=is_video)
+                    estimated_time_str = format_processing_time(estimated_time)
+                    
+                    # Проверяем, нужно ли использовать модель меньшего размера
+                    should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
+                    if should_switch:
+                        estimated_time = predict_processing_time(file_path, smaller_model, is_video=is_video)
+                        estimated_time_str = format_processing_time(estimated_time)
+                    
+                    # Запускаем фоновый обработчик очереди, если он еще не запущен
+                    await ensure_background_processor_running()
+                    
+                    # Добавляем задачу в базу данных
+                    # Используем специальный user_id для файлов из downloads и фиктивные message_id и chat_id
+                    add_to_queue(DOWNLOADS_USER_ID, file_path, filename, file_size_mb, 0, 0)
+                    
+                    # Помечаем файл как обработанный
+                    processed_downloads_files.add(file_path)
+                    
+                    # Удаляем из списка загружающихся, если был там
+                    files_being_uploaded.pop(file_path, None)
+                    
+                    logger.info(f"Файл {filename} добавлен в очередь транскрибации из папки downloads")
+                    
+                except Exception as e:
+                    logger.exception(f"Ошибка при обработке файла {filename} из downloads: {e}")
+                    # Удаляем из списка загружающихся при ошибке
+                    files_being_uploaded.pop(file_path, None)
+            
+            # Очищаем устаревшие записи о загружающихся файлах (файлы, которых больше нет)
+            files_to_remove = []
+            for tracked_path in list(files_being_uploaded.keys()):
+                if not os.path.exists(tracked_path):
+                    files_to_remove.append(tracked_path)
+                    logger.debug(f"Удаляем из отслеживания несуществующий файл: {os.path.basename(tracked_path)}")
+            
+            for path in files_to_remove:
+                files_being_uploaded.pop(path, None)
+            
+            # Проверяем каждые 30 секунд
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            logger.exception(f"Ошибка в мониторинге папки downloads: {e}")
+            await asyncio.sleep(60)  # При ошибке ждем дольше
+
+def init_downloads_monitoring():
+    """
+    Инициализирует мониторинг папки downloads для автоматической обработки файлов
+    """
+    async def delayed_start():
+        await asyncio.sleep(15)  # Задержка 15 секунд после запуска бота
+        await asyncio.create_task(monitor_downloads_folder())
+        logger.info("Запущен мониторинг папки downloads")
+        
+    asyncio.create_task(delayed_start())
+    logger.info("Мониторинг папки downloads будет запущен через 15 секунд")

@@ -7,7 +7,7 @@ import time
 import subprocess
 import json
 
-from create_bot import env_config, SMALL_MODEL_THRESHOLD_MB
+from create_bot import env_config, SMALL_MODEL_THRESHOLD_MB, DOWNLOADS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -627,10 +627,9 @@ async def extract_audio_from_video(video_file, output_format="wav"):
         if not os.path.exists(video_file):
             raise FileNotFoundError(f"Видеофайл не найден: {video_file}")
         
-        # Создаем временный файл
-        temp_dir = "temp_audio"
-        os.makedirs(temp_dir, exist_ok=True)
-        output_file = f"{temp_dir}/extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.{output_format}"
+        # Создаем файл в папке downloads
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        output_file = f"{DOWNLOADS_DIR}/extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.{output_format}"
         
         # Извлекаем аудио из видео
         # Используем параметры для оптимальной обработки Whisper:

@@ -15,7 +15,7 @@ from openai import OpenAI
 
 from audio_service import thread_executor, \
     handle_audio_service, \
-    init_monitoring, cancel_audio_processing, background_processor
+    init_monitoring, init_downloads_monitoring, cancel_audio_processing, background_processor
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
     USE_LOCAL_WHISPER
 from db_service import get_cmd_status, check_message_limit, get_all_from_queue, reset_active_tasks
@@ -439,6 +439,10 @@ async def main():
         # Инициализируем мониторинг фонового обработчика
         init_monitoring()
         logger.info('Инициализирован мониторинг фонового обработчика')
+        
+        # Инициализируем мониторинг папки downloads
+        init_downloads_monitoring()
+        logger.info('Инициализирован мониторинг папки downloads')
         
         # Устанавливаем команды в меню бота
         await set_commands()

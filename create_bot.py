@@ -80,6 +80,7 @@ SMALL_MODEL_THRESHOLD_MB = int(env_config.get('SMALL_MODEL_THRESHOLD_MB', '20'))
 
 # Директории для файлов
 TEMP_AUDIO_DIR = "temp_audio"
+DOWNLOADS_DIR = "downloads"
 TRANSCRIPTION_DIR = "transcriptions"
 
 # Ограничения для Telegram
@@ -98,5 +99,6 @@ else:
 
 # Создаем директории, если они не существуют
 os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTION_DIR, exist_ok=True)
 os.makedirs(WHISPER_MODELS_DIR, exist_ok=True)
