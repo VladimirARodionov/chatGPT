@@ -336,6 +336,20 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small", 
         # Проверяем, нужно ли использовать модель меньшего размера
         should_switch, smaller_model = should_use_smaller_model(file_size_mb, model_name)
         
+        # Переключаемся на меньшую модель, если нужно (независимо от is_large_file)
+        actual_model_used = model_name
+        if should_switch:
+            logger.info(f"Для файла ({file_size_mb:.2f} МБ) переключаемся с модели {model_name} на {smaller_model} для оптимизации памяти")
+            try:
+                model = get_whisper_model(smaller_model)
+                if model is None:
+                    logger.error("Не удалось загрузить облегченную модель для большого файла")
+                    return None
+                actual_model_used = smaller_model
+            except Exception as model_error:
+                logger.warning(f"Ошибка при переключении на облегченную модель: {model_error}, продолжаем с исходной {model_name}")
+                actual_model_used = model_name
+        
         if is_large_file:
             logger.info(f"Обрабатываем большой аудио файл ({file_size_mb:.2f} МБ), применяем оптимизации для памяти")
             
@@ -362,17 +376,6 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small", 
                 transcribe_options["temperature"] = 0.2
                 
             logger.info(f"Применяем оптимизации для большого файла: {transcribe_options}")
-            
-            # Можно также переключиться на более легкую модель, если текущая слишком тяжелая
-            if should_switch:
-                logger.info(f"Для большого файла временно переключаемся с модели {model_name} на {smaller_model} для экономии памяти")
-                try:
-                    model = get_whisper_model(smaller_model)
-                    if model is None:
-                        logger.error("Не удалось загрузить облегченную модель для большого файла")
-                        return None
-                except Exception as model_error:
-                    logger.warning(f"Ошибка при переключении на облегченную модель: {model_error}, продолжаем с исходной")
                 
         # Выполняем транскрипцию
         try:
@@ -571,14 +574,7 @@ async def transcribe_with_whisper(file_path, language=None, model_name="small", 
             
             ratio = audio_duration / elapsed_time if elapsed_time > 0 else 0
             
-            # Добавляем информацию о том, что модель была переключена
-            actual_model_used = model_name
-            if is_large_file:
-                # Используем функцию для определения модели
-                was_switched, smaller_model_name = should_use_smaller_model(file_size_mb, model_name)
-                if was_switched:
-                    actual_model_used = smaller_model_name
-                
+            # actual_model_used уже определен выше при переключении модели
             # Добавляем метаданные о транскрибации
             result["whisper_model"] = actual_model_used
             result["processing_time"] = elapsed_time
@@ -707,7 +703,7 @@ def should_use_smaller_model(file_size_mb, model_name):
         (bool, str): Кортеж (нужно ли менять модель, название новой модели)
     """
     # Модели, требующие много памяти
-    heavy_models = ["medium", "large", "large-v2", "large-v3", "turbo"]
+    heavy_models = ["medium", "large", "large-v2", "large-v3"]
     
     # Пороги размера файла для переключения на модель меньшего размера
     # Значение берется из конфигурации .env файла (SMALL_MODEL_THRESHOLD_MB)

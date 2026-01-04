@@ -875,21 +875,13 @@ async def background_processor():
 
                 # Пытаемся получить информацию о фактически использованной модели из результата
                 if isinstance(transcription, dict) and "whisper_model" in transcription:
-                    used_model = transcription.get("whisper_model")
+                    used_model = transcription.get("whisper_model", WHISPER_MODEL)
 
                     # Если использованная модель отличается от заданной, добавляем информацию
                     if used_model != WHISPER_MODEL:
                         processing_time = transcription.get("processing_time", 0)
                         processing_time_str = f" (время обработки: {format_processing_time(processing_time)})" if processing_time > 0 else ""
                         message_text += f"ℹ️ Использована модель {used_model} вместо {WHISPER_MODEL} для оптимизации памяти{processing_time_str}.\n\n"
-                else:
-                    # Если информации нет в результате, используем приблизительную проверку по размеру файла
-                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
-                    should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
-
-                    if should_switch:
-                        used_model = smaller_model
-                        message_text += f"ℹ️ Для обработки использована модель {smaller_model} вместо {WHISPER_MODEL} из-за большого размера файла.\n\n"
 
                 # Получаем текст транскрибации
                 transcription_text = ""
