@@ -165,7 +165,7 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
     return filename
 
 # Функция для очистки временных файлов
-def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None):
+def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None, skip_downloads=False):
     """
     Удаляет временные файлы после обработки аудио
 
@@ -173,6 +173,7 @@ def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None):
         file_path: Конкретный файл для удаления (если указан)
         older_than_hours: Удалить все файлы старше указанного количества часов
         exclude_files: Список путей файлов, которые не нужно удалять (например, файлы, которые еще загружаются)
+        skip_downloads: Если True, не удалять файлы из папки downloads (используется при стартовой очистке)
     """
     try:
         # Если указан конкретный файл, удаляем его
@@ -202,8 +203,8 @@ def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None):
                         os.remove(file_path)
                         count_removed += 1
         
-        # Очищаем файлы из downloads
-        if os.path.exists(DOWNLOADS_DIR):
+        # Очищаем файлы из downloads (если не пропущено)
+        if not skip_downloads and os.path.exists(DOWNLOADS_DIR):
             # Нормализуем список исключаемых файлов для сравнения
             exclude_paths = set()
             if exclude_files:

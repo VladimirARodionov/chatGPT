@@ -427,7 +427,8 @@ async def main():
             logger.info(f'Сброшено {reset_count} активных задач из предыдущего запуска')
         
         # Очищаем старые временные файлы при запуске
-        cleanup_temp_files(older_than_hours=24)
+        # Пропускаем очистку downloads, так как мониторинг еще не запущен и файлы могут быть не в очереди
+        cleanup_temp_files(older_than_hours=24, skip_downloads=True)
         logger.info('Выполнена очистка старых временных файлов')
         
         # Запускаем фоновый обработчик очереди
