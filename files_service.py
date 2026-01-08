@@ -235,8 +235,14 @@ def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None, 
                     
                     # Получаем время последнего изменения файла
                     file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-                    # Вычисляем, сколько часов прошло
+                    # Вычисляем, сколько часов прошло с последнего изменения
                     age_hours = (current_time - file_mod_time).total_seconds() / 3600
+                    
+                    # Дополнительная защита: не удаляем файлы, которые были изменены недавно (в последний час)
+                    # Это защищает файлы, которые только что были скопированы в папку, но еще не обнаружены мониторингом
+                    if age_hours < 1.0:
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он был изменен недавно ({age_hours:.2f} часов назад)")
+                        continue
 
                     # Если файл старше указанного времени, удаляем его
                     if age_hours > older_than_hours:
