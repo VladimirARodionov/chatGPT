@@ -165,7 +165,7 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
     return filename
 
 # Функция для очистки временных файлов
-def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None, skip_downloads=False):
+def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None, skip_downloads=True):
     """
     Удаляет временные файлы после обработки аудио
 
