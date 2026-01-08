@@ -1372,13 +1372,15 @@ async def monitor_downloads_folder():
                     logger.info(f"Обнаружен новый {file_type} файл в downloads (полностью загружен): {filename} ({file_size_mb:.2f} МБ)")
                     
                     # Предсказываем время обработки
-                    estimated_time = predict_processing_time(file_path, WHISPER_MODEL, is_video=is_video)
+                    # Не передаем is_video явно, чтобы predict_processing_time могла точно определить тип файла через ffprobe
+                    # Это обеспечит одинаковую логику расчета времени для файлов из downloads и из Telegram
+                    estimated_time = predict_processing_time(file_path, WHISPER_MODEL, is_video=None)
                     estimated_time_str = format_processing_time(estimated_time)
                     
                     # Проверяем, нужно ли использовать модель меньшего размера
                     should_switch, smaller_model = should_use_smaller_model(file_size_mb, WHISPER_MODEL)
                     if should_switch:
-                        estimated_time = predict_processing_time(file_path, smaller_model, is_video=is_video)
+                        estimated_time = predict_processing_time(file_path, smaller_model, is_video=None)
                         estimated_time_str = format_processing_time(estimated_time)
                     
                     # Запускаем фоновый обработчик очереди, если он еще не запущен
