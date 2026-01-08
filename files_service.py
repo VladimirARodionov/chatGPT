@@ -11,6 +11,7 @@ from aiogram.types import FSInputFile
 
 from create_bot import TEMP_AUDIO_DIR, DOWNLOADS_DIR, TRANSCRIPTION_DIR, MAX_MESSAGE_LENGTH, LOCAL_BOT_API, MAX_CAPTION_LENGTH, \
     MAX_FILE_SIZE, bot, LOCAL_BOT_API_FILES_PATH
+from db_service import is_file_in_queue
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,12 @@ def cleanup_temp_files(file_path=None, older_than_hours=24):
 
                 # Проверяем, что это файл, а не директория
                 if os.path.isfile(file_path):
+                    # Проверяем, находится ли файл в очереди на обработку
+                    # Не удаляем файлы, которые еще не обработаны
+                    if is_file_in_queue(file_path):
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он находится в очереди на обработку")
+                        continue
+                    
                     # Получаем время последнего изменения файла
                     file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
                     # Вычисляем, сколько часов прошло

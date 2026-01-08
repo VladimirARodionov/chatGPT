@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -180,3 +181,36 @@ def get_active_tasks():
             TranscribeQueue.cancelled == False
         ).order_by(TranscribeQueue.id.asc()).all()
         return active_tasks
+
+def is_file_in_queue(file_path: str) -> bool:
+    """
+    Проверяет, находится ли файл в очереди на обработку (не завершен и не отменен).
+    
+    Args:
+        file_path: Путь к файлу для проверки
+        
+    Returns:
+        True если файл находится в очереди, False в противном случае
+    """
+    try:
+        with get_db_session() as session:
+            # Нормализуем путь для сравнения (приводим к единому формату)
+            normalized_path = os.path.normpath(os.path.abspath(file_path))
+            
+            # Получаем все незавершенные и неотмененные задачи
+            tasks = session.query(TranscribeQueue).filter(
+                TranscribeQueue.finished == False,
+                TranscribeQueue.cancelled == False
+            ).all()
+            
+            # Сравниваем нормализованные пути
+            for task in tasks:
+                task_path_normalized = os.path.normpath(os.path.abspath(task.file_path))
+                if task_path_normalized == normalized_path:
+                    return True
+            
+            return False
+    except Exception as e:
+        logger.exception(f"Ошибка при проверке файла в очереди: {e}")
+        # В случае ошибки возвращаем True, чтобы не удалить файл по ошибке
+        return True
