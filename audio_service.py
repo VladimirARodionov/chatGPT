@@ -483,7 +483,9 @@ async def background_processor():
                 # Каждые 10 циклов выполняем очистку старых файлов
                 if cleanup_counter >= 10:
                     cleanup_counter = 0
-                    cleanup_temp_files(older_than_hours=24)
+                    # Передаем список файлов, которые еще загружаются, чтобы не удалять их
+                    exclude_files = list(files_being_uploaded.keys()) if files_being_uploaded else None
+                    cleanup_temp_files(older_than_hours=24, exclude_files=exclude_files)
 
                 # Найдем первую задачу в очереди, которая не активна, не завершена и не отменена
                 # Для этого получим все очереди пользователей и найдем первую неактивную задачу

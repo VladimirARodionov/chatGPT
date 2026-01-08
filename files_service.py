@@ -165,13 +165,14 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
     return filename
 
 # Функция для очистки временных файлов
-def cleanup_temp_files(file_path=None, older_than_hours=24):
+def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None):
     """
     Удаляет временные файлы после обработки аудио
 
     Args:
         file_path: Конкретный файл для удаления (если указан)
         older_than_hours: Удалить все файлы старше указанного количества часов
+        exclude_files: Список путей файлов, которые не нужно удалять (например, файлы, которые еще загружаются)
     """
     try:
         # Если указан конкретный файл, удаляем его
@@ -203,11 +204,28 @@ def cleanup_temp_files(file_path=None, older_than_hours=24):
         
         # Очищаем файлы из downloads
         if os.path.exists(DOWNLOADS_DIR):
+            # Нормализуем список исключаемых файлов для сравнения
+            exclude_paths = set()
+            if exclude_files:
+                for exclude_path in exclude_files:
+                    try:
+                        exclude_paths.add(os.path.normpath(os.path.abspath(exclude_path)))
+                    except Exception:
+                        pass
+            
             for filename in os.listdir(DOWNLOADS_DIR):
                 file_path = os.path.join(DOWNLOADS_DIR, filename)
 
                 # Проверяем, что это файл, а не директория
                 if os.path.isfile(file_path):
+                    # Нормализуем путь для сравнения
+                    normalized_path = os.path.normpath(os.path.abspath(file_path))
+                    
+                    # Проверяем, находится ли файл в списке исключений (например, загружается)
+                    if normalized_path in exclude_paths:
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он еще загружается")
+                        continue
+                    
                     # Проверяем, находится ли файл в очереди на обработку
                     # Не удаляем файлы, которые еще не обработаны
                     if is_file_in_queue(file_path):
