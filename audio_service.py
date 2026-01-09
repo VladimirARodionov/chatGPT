@@ -1120,19 +1120,32 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
     # Получаем все активные задачи пользователя
     user_queue = get_queue(user_id)
     
-    if not user_queue:
-        logger.info(f"Для пользователя {user_id} не найдено активных задач")
-        return False, "У вас нет активных задач на транскрибацию."
-    
     cancelled_count = 0
     
     # Отменяем все активные задачи пользователя
-    for task in user_queue:
-        if set_cancelled_queue(task.id):
-            cancelled_count += 1
-            logger.info(f"Задача {task.id} для пользователя {user_id} успешно отменена")
-        else:
-            logger.warning(f"Не удалось отменить задачу {task.id} для пользователя {user_id}")
+    if user_queue:
+        for task in user_queue:
+            if set_cancelled_queue(task.id):
+                cancelled_count += 1
+                logger.info(f"Задача {task.id} для пользователя {user_id} успешно отменена")
+            else:
+                logger.warning(f"Не удалось отменить задачу {task.id} для пользователя {user_id}")
+    
+    # Если пользователь является superuser, также отменяем задачи из downloads
+    if user_id in superusers:
+        downloads_queue = get_queue(DOWNLOADS_USER_ID)
+        if downloads_queue:
+            downloads_cancelled = 0
+            for task in downloads_queue:
+                if set_cancelled_queue(task.id):
+                    downloads_cancelled += 1
+                    cancelled_count += 1
+                    logger.info(f"Задача {task.id} из downloads для superuser {user_id} успешно отменена")
+                else:
+                    logger.warning(f"Не удалось отменить задачу {task.id} из downloads для superuser {user_id}")
+            
+            if downloads_cancelled > 0:
+                logger.info(f"Отменено {downloads_cancelled} задач из downloads для superuser {user_id}")
     
     if cancelled_count > 0:
         # Формируем текст в зависимости от количества отмененных задач
@@ -1142,7 +1155,10 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
         
         return True, f"✅ {cancelled_count} {task_text} на транскрибацию отменено."
     else:
-        return False, "Не удалось отменить задачи на транскрибацию."
+        if user_id in superusers:
+            return False, "Не найдено активных задач для отмены (ни ваших, ни из downloads)."
+        else:
+            return False, "У вас нет активных задач на транскрибацию."
 
 async def ensure_background_processor_running():
     """Гарантирует, что фоновый процессор аудио запущен и работает корректно.
