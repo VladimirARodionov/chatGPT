@@ -13,7 +13,7 @@ from audio_utils import predict_processing_time, should_use_smaller_model, conve
 from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, DOWNLOADS_DIR, \
     LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT, superusers
 from db_service import check_message_limit, get_queue, add_to_queue, set_active_queue, set_finished_queue, \
-    set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks
+    set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks, is_task_cancelled
 from files_service import cleanup_temp_files, save_transcription_to_file, download_voice, \
     get_file_path_direct, download_large_file_direct, send_file_safely
 from models import TranscribeQueue
@@ -650,6 +650,22 @@ async def background_processor():
                 # Запускаем транскрибацию в отдельном потоке, чтобы не блокировать event loop
                 loop = asyncio.get_event_loop()
                 try:
+                    # Проверяем отмену ПЕРЕД запуском транскрибации
+                    with get_db_session() as session:
+                        task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
+                        if task_status and task_status.cancelled:
+                            logger.info(f"Задача {active_task.id} была отменена до запуска транскрибации")
+                            cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                            await processing_msg.edit_text(cancel_message)
+                            if is_downloads_file:
+                                logger.info(f"[Downloads] Обработка файла {file_name} была отменена до запуска транскрибации")
+                            # Удаляем временные файлы
+                            try:
+                                cleanup_temp_files(file_path)
+                            except Exception as e:
+                                logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
+                            continue
+                    
                     # Перед созданием future, убедимся, что файл существует
                     if not os.path.exists(file_path):
                         logger.error(f"Файл не существует перед запуском транскрибации: {file_path}")
@@ -765,11 +781,53 @@ async def background_processor():
 
                     # Если задача была отменена, пропускаем дальнейшую обработку
                     if cancelled:
+                        # Пытаемся отменить future, если это возможно
+                        if not future.done():
+                            future.cancel()
+                            logger.info(f"Попытка отменить future для задачи {active_task.id}")
+                        # Помечаем задачу как отмененную в базе данных
+                        set_cancelled_queue(active_task.id)
                         continue
 
-                    # Получаем результат
+                    # Дополнительная проверка отмены перед ожиданием результата
+                    with get_db_session() as session:
+                        task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
+                        if task_status and task_status.cancelled:
+                            logger.info(f"Задача {active_task.id} была отменена перед получением результата")
+                            if not future.done():
+                                future.cancel()
+                            cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                            await processing_msg.edit_text(cancel_message)
+                            if is_downloads_file:
+                                logger.info(f"[Downloads] Обработка файла {file_name} была отменена перед получением результата")
+                            set_cancelled_queue(active_task.id)
+                            continue
+
+                    # Получаем результат только если задача не была отменена
+                    transcription = None
                     try:
-                        transcription = await future
+                        # Если future уже завершился (транскрибация закончилась), получаем результат
+                        # Если нет - пропускаем ожидание, чтобы не блокировать обработку других задач
+                        # Транскрибация продолжит выполняться в фоне, но результат будет проигнорирован
+                        if future.done():
+                            transcription = await future
+                        else:
+                            # Проверяем отмену еще раз перед ожиданием
+                            with get_db_session() as session:
+                                task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
+                                if task_status and task_status.cancelled:
+                                    logger.info(f"Задача {active_task.id} была отменена, пропускаем ожидание результата")
+                                    if not future.done():
+                                        future.cancel()
+                                    cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                                    await processing_msg.edit_text(cancel_message)
+                                    if is_downloads_file:
+                                        logger.info(f"[Downloads] Обработка файла {file_name} была отменена, пропускаем ожидание результата")
+                                    set_cancelled_queue(active_task.id)
+                                    continue
+                            
+                            # Если задача не отменена, ждем результат
+                            transcription = await future
                     except asyncio.CancelledError:
                         logger.info(f"Транскрибация для пользователя {user_id} отменена")
                         cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."

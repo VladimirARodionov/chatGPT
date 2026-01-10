@@ -129,6 +129,22 @@ def set_cancelled_queue(id: int):
         else:
             return False
 
+def is_task_cancelled(task_id: int) -> bool:
+    """
+    Проверяет, отменена ли задача по её ID.
+    
+    Args:
+        task_id: ID задачи для проверки
+        
+    Returns:
+        True если задача отменена, False в противном случае
+    """
+    with get_db_session() as session:
+        task = session.query(TranscribeQueue).where(TranscribeQueue.id == task_id).first()
+        if task:
+            return task.cancelled
+        return False
+
 def get_first_from_queue():
     with get_db_session() as session:
         first_item = session.query(TranscribeQueue).filter(
