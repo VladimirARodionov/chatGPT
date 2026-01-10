@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-from audio_service import thread_executor, \
+from audio_service import process_executor, \
     handle_audio_service, \
     init_monitoring, init_downloads_monitoring, cancel_audio_processing, background_processor
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
@@ -187,7 +187,7 @@ async def cmd_queue(message: types.Message):
     # Добавляем информацию о состоянии фоновых процессов
     queue_info += f"\n🖥 <b>Системная информация:</b>\n"
     queue_info += f"- Фоновый обработчик: {processor_status}\n"
-    queue_info += f"- Рабочих потоков: {thread_executor._max_workers}\n"
+    queue_info += f"- Рабочих процессов: {process_executor._max_workers}\n"
     
     # Если обработчик требует перезапуска, запускаем его и уведомляем пользователя
     if restart_needed:
