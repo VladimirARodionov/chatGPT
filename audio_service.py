@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import os
+import signal
 from datetime import datetime, timedelta
+import multiprocessing
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 from openai import OpenAI
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, Future
 
 from audio_utils import predict_processing_time, should_use_smaller_model, convert_audio_format, \
     transcribe_with_whisper, should_condition_on_previous_text, extract_audio_from_video
@@ -20,8 +22,15 @@ from models import TranscribeQueue
 
 logger = logging.getLogger(__name__)
 
-# Пул потоков для CPU-интенсивных операций
-thread_executor = ThreadPoolExecutor(max_workers=3)
+# Пул процессов для CPU-интенсивных операций (можно убить процесс при отмене)
+process_executor = ProcessPoolExecutor(max_workers=3)
+
+# Словарь для отслеживания активных процессов транскрибации по task_id
+# Формат: {task_id: {'process': Process, 'future': Future, 'pid': int}}
+active_transcription_processes = {}
+
+# Блокировка для безопасного доступа к словарю процессов
+processes_lock = asyncio.Lock()
 
 # Хранение ссылки на задачу фонового обработчика
 background_worker_task = None
@@ -372,6 +381,104 @@ async def handle_audio_service(message: Message):
         logger.exception(f"Ошибка при обработке аудио: {e}")
 
 
+def _run_transcribe_in_process(file_path, condition_on_previous_text, task_id, result_queue, error_queue):
+    """
+    Функция, которая выполняется в отдельном процессе для транскрибации аудио.
+    Результат помещается в result_queue, ошибки - в error_queue.
+    """
+    try:
+        result = _transcribe_audio_sync(file_path, condition_on_previous_text, USE_LOCAL_WHISPER, task_id)
+        result_queue.put(result)
+    except Exception as e:
+        error_queue.put(e)
+        import traceback
+        logger.exception(f"Ошибка в процессе транскрибации для задачи {task_id}: {e}")
+        logger.error(traceback.format_exc())
+
+
+def _transcribe_audio_sync(file_path, condition_on_previous_text=False, use_local_whisper=USE_LOCAL_WHISPER, task_id=None):
+    """
+    Синхронная обертка для транскрибации аудио, которая может быть выполнена в отдельном процессе.
+    Периодически проверяет, не отменена ли задача, и прерывает транскрибацию при отмене.
+    """
+    try:
+        if use_local_whisper:
+            # Проверяем отмену перед началом транскрибации
+            if task_id is not None and is_task_cancelled(task_id):
+                logger.info(f"Задача {task_id} была отменена перед транскрибацией")
+                return None
+            
+            # Конвертируем в нужный формат для Whisper если нужно
+            try:
+                # Для синхронной версии нужно использовать синхронную конвертацию
+                # Пока используем оригинальный файл, конвертация будет выполнена внутри transcribe_with_whisper
+                converted_file = file_path
+            except Exception as conv_error:
+                logger.error(f"Ошибка при конвертации аудиофайла: {conv_error}")
+                converted_file = file_path
+
+            # Проверяем, существует ли файл и не пустой ли он
+            if not os.path.exists(converted_file) or os.path.getsize(converted_file) == 0:
+                logger.error(f"Файл не существует или пуст: {converted_file}")
+                return None
+
+            # Проверяем отмену перед запуском транскрибации
+            if task_id is not None and is_task_cancelled(task_id):
+                logger.info(f"Задача {task_id} была отменена перед запуском транскрибации")
+                return None
+
+            # Используем локальную модель Whisper (синхронно через asyncio.run)
+            # В процессе можно использовать asyncio.run, так как у процесса свой event loop
+            transcription = asyncio.run(transcribe_with_whisper(
+                converted_file,
+                model_name=WHISPER_MODEL,
+                condition_on_previous_text=condition_on_previous_text
+            ))
+
+            # Проверяем отмену после транскрибации
+            if task_id is not None and is_task_cancelled(task_id):
+                logger.info(f"Задача {task_id} была отменена после транскрибации, игнорируем результат")
+                return None
+
+            return transcription
+        else:
+            # Используем OpenAI API
+            client = OpenAI(api_key=env_config.get('OPEN_AI_TOKEN'),
+                            max_retries=3,
+                            timeout=30)
+
+            # Проверяем, что файл существует и не пустой
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                logger.error(f"Файл не существует или пуст: {file_path}")
+                return None
+
+            with open(file_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file
+                )
+            
+            # Проверяем результат транскрибации
+            if transcription is None:
+                logger.error("OpenAI API вернул None при транскрибации")
+                return None
+            
+            # Проверяем наличие текста в результате
+            if not hasattr(transcription, 'text') or transcription.text is None:
+                logger.error("OpenAI API вернул транскрибацию без текста")
+                return None
+            
+            text = transcription.text.strip()
+            if not text:
+                logger.warning("Транскрибация вернула пустую строку")
+                return ""
+            
+            return text
+    except Exception as e:
+        logger.exception(f"Ошибка при транскрибации: {e}")
+        raise
+
+
 async def transcribe_audio(file_path, condition_on_previous_text = False, use_local_whisper=USE_LOCAL_WHISPER):
     """Транскрибация аудио с использованием OpenAI API или локальной модели Whisper"""
     try:
@@ -677,12 +784,121 @@ async def background_processor():
                         set_finished_queue(active_task.id)
                         continue
                         
-                    # Создаем объект будущего результата
-                    future = loop.run_in_executor(
-                        thread_executor,
-                        # Оборачиваем асинхронную функцию в синхронную
-                        lambda fp=file_path: asyncio.run(transcribe_audio(fp, should_condition_on_previous_text(file_size_mb)))
+                    # Создаем процесс для транскрибации, чтобы можно было убить его при отмене
+                    result_queue = multiprocessing.Queue()
+                    error_queue = multiprocessing.Queue()
+                    
+                    # Создаем процесс для транскрибации
+                    transcribe_process = multiprocessing.Process(
+                        target=_run_transcribe_in_process,
+                        args=(file_path, should_condition_on_previous_text(file_size_mb), active_task.id, result_queue, error_queue),
+                        daemon=True
                     )
+                    transcribe_process.start()
+                    
+                    # Сохраняем ссылку на процесс для возможности убить его при отмене
+                    async with processes_lock:
+                        active_transcription_processes[active_task.id] = {
+                            'process': transcribe_process,
+                            'pid': transcribe_process.pid,
+                            'result_queue': result_queue,
+                            'error_queue': error_queue
+                        }
+                    
+                    logger.info(f"Запущен процесс транскрибации для задачи {active_task.id}, PID: {transcribe_process.pid}")
+                    
+                    # Создаем future-подобный объект для совместимости с существующим кодом
+                    class ProcessFuture:
+                        def __init__(self, process, result_queue, error_queue, task_id):
+                            self.process = process
+                            self.result_queue = result_queue
+                            self.error_queue = error_queue
+                            self.task_id = task_id
+                            self._result = None
+                            self._done = False
+                            self._exception = None
+                        
+                        def done(self):
+                            return self._done or not self.process.is_alive()
+                        
+                        def cancel(self):
+                            """Пытается убить процесс (синхронный метод)"""
+                            if self.process.is_alive():
+                                logger.info(f"Попытка убить процесс {self.process.pid} для задачи {self.task_id}")
+                                try:
+                                    self.process.terminate()
+                                    self.process.join(timeout=5)
+                                    if self.process.is_alive():
+                                        logger.warning(f"Процесс {self.process.pid} не завершился после terminate, убиваем принудительно")
+                                        self.process.kill()
+                                        self.process.join(timeout=2)
+                                    logger.info(f"Процесс {self.process.pid} для задачи {self.task_id} успешно убит")
+                                except Exception as e:
+                                    logger.exception(f"Ошибка при попытке убить процесс {self.process.pid}: {e}")
+                            
+                            self._done = True
+                            # Удаляем процесс из словаря активных процессов (синхронный доступ безопасен)
+                            try:
+                                active_transcription_processes.pop(self.task_id, None)
+                            except Exception as e:
+                                logger.warning(f"Ошибка при удалении процесса из словаря: {e}")
+                            return True
+                        
+                        async def get_result(self):
+                            """Получает результат из очереди (асинхронный метод)"""
+                            try:
+                                while self.process.is_alive():
+                                    try:
+                                        # Проверяем очередь результатов
+                                        if not self.result_queue.empty():
+                                            result = self.result_queue.get_nowait()
+                                            self._result = result
+                                            self._done = True
+                                            return result
+                                        
+                                        # Проверяем очередь ошибок
+                                        if not self.error_queue.empty():
+                                            error = self.error_queue.get_nowait()
+                                            self._exception = error
+                                            self._done = True
+                                            raise error
+                                        
+                                        # Небольшая пауза перед следующей проверкой
+                                        await asyncio.sleep(0.5)
+                                    except (EOFError, OSError):
+                                        # Очередь закрыта или недоступна, это нормально
+                                        break
+                                
+                                # Процесс завершился, проверяем очереди еще раз
+                                try:
+                                    if not self.result_queue.empty():
+                                        result = self.result_queue.get_nowait()
+                                        self._result = result
+                                        self._done = True
+                                        return result
+                                    
+                                    if not self.error_queue.empty():
+                                        error = self.error_queue.get_nowait()
+                                        self._exception = error
+                                        self._done = True
+                                        raise error
+                                except (EOFError, OSError):
+                                    # Очередь закрыта или недоступна, это нормально после завершения процесса
+                                    pass
+                                
+                                # Процесс завершился, но результат не получен
+                                self._done = True
+                                if self.process.exitcode != 0 and self.process.exitcode is not None:
+                                    raise RuntimeError(f"Процесс транскрибации завершился с кодом {self.process.exitcode}")
+                                return None
+                            finally:
+                                # Удаляем процесс из словаря активных процессов после получения результата или ошибки
+                                try:
+                                    active_transcription_processes.pop(self.task_id, None)
+                                except Exception as e:
+                                    logger.warning(f"Ошибка при удалении процесса из словаря: {e}")
+                    
+                    future = ProcessFuture(transcribe_process, result_queue, error_queue, active_task.id)
 
                     # Ожидаем результат с периодическим обновлением статуса
                     start_time = datetime.now()
@@ -694,9 +910,9 @@ async def background_processor():
                             task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
                             if task_status and task_status.cancelled:
                                 cancelled = True
-                                # Отменяем future (если возможно)
+                                # Убиваем процесс транскрибации
                                 future.cancel()
-                                logger.info(f"Транскрибация для пользователя {user_id} была отменена во время обработки.")
+                                logger.info(f"Транскрибация для пользователя {user_id} была отменена во время обработки, процесс убит")
 
                                 # Удаляем временные файлы
                                 try:
@@ -708,7 +924,7 @@ async def background_processor():
                                 cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
                                 await processing_msg.edit_text(cancel_message)
                                 if is_downloads_file:
-                                    logger.info(f"[Downloads] Обработка файла {file_name} была отменена")
+                                    logger.info(f"[Downloads] Обработка файла {file_name} была отменена, процесс убит")
                                 break
 
                         # Обновляем сообщение о статусе каждые 30 секунд
@@ -781,12 +997,12 @@ async def background_processor():
 
                     # Если задача была отменена, пропускаем дальнейшую обработку
                     if cancelled:
-                        # Пытаемся отменить future, если это возможно
-                        if not future.done():
-                            future.cancel()
-                            logger.info(f"Попытка отменить future для задачи {active_task.id}")
+                        # Процесс уже убит в цикле выше
                         # Помечаем задачу как отмененную в базе данных
                         set_cancelled_queue(active_task.id)
+                        # Очищаем ссылку на процесс
+                        async with processes_lock:
+                            active_transcription_processes.pop(active_task.id, None)
                         continue
 
                     # Дополнительная проверка отмены перед ожиданием результата
@@ -806,28 +1022,21 @@ async def background_processor():
                     # Получаем результат только если задача не была отменена
                     transcription = None
                     try:
-                        # Если future уже завершился (транскрибация закончилась), получаем результат
-                        # Если нет - пропускаем ожидание, чтобы не блокировать обработку других задач
-                        # Транскрибация продолжит выполняться в фоне, но результат будет проигнорирован
-                        if future.done():
-                            transcription = await future
-                        else:
-                            # Проверяем отмену еще раз перед ожиданием
-                            with get_db_session() as session:
-                                task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
-                                if task_status and task_status.cancelled:
-                                    logger.info(f"Задача {active_task.id} была отменена, пропускаем ожидание результата")
-                                    if not future.done():
-                                        future.cancel()
-                                    cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
-                                    await processing_msg.edit_text(cancel_message)
-                                    if is_downloads_file:
-                                        logger.info(f"[Downloads] Обработка файла {file_name} была отменена, пропускаем ожидание результата")
-                                    set_cancelled_queue(active_task.id)
-                                    continue
-                            
-                            # Если задача не отменена, ждем результат
-                            transcription = await future
+                        # Проверяем отмену перед ожиданием результата
+                        with get_db_session() as session:
+                            task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
+                            if task_status and task_status.cancelled:
+                                logger.info(f"Задача {active_task.id} была отменена перед получением результата, убиваем процесс")
+                                future.cancel()
+                                cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
+                                await processing_msg.edit_text(cancel_message)
+                                if is_downloads_file:
+                                    logger.info(f"[Downloads] Обработка файла {file_name} была отменена, процесс убит")
+                                set_cancelled_queue(active_task.id)
+                                continue
+                        
+                        # Если задача не отменена, ждем результат
+                        transcription = await future.get_result()
                     except asyncio.CancelledError:
                         logger.info(f"Транскрибация для пользователя {user_id} отменена")
                         cancel_message = f"❌ Обработка файла {file_name} была отменена." if is_downloads_file else "❌ Обработка была отменена."
@@ -1130,6 +1339,10 @@ async def background_processor():
 
                 # Отмечаем задачу как выполненную
                 set_finished_queue(active_task.id)
+                
+                # Удаляем процесс из словаря активных процессов после завершения транскрибации
+                async with processes_lock:
+                    active_transcription_processes.pop(active_task.id, None)
 
             except asyncio.TimeoutError:
                 # Проверка пустой очереди - нормальная ситуация
@@ -1166,7 +1379,41 @@ async def background_processor():
         async with processor_lock:
             logger.info("Фоновый обработчик аудиофайлов завершен")
 
-def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
+def _kill_transcription_process(task_id: int):
+    """Убивает процесс транскрибации для задачи с указанным ID (синхронная функция)"""
+    try:
+        # Получаем информацию о процессе из словаря
+        # Словарь Python потокобезопасен для чтения, но не для записи
+        # В нашем случае мы только читаем и удаляем элементы, что должно быть безопасно
+        process_info = active_transcription_processes.get(task_id)
+        if process_info:
+            process = process_info.get('process')
+            pid = process_info.get('pid')
+            if process and process.is_alive():
+                logger.info(f"Убиваем процесс {pid} для задачи {task_id}")
+                try:
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        logger.warning(f"Процесс {pid} не завершился после terminate, убиваем принудительно")
+                        process.kill()
+                        process.join(timeout=2)
+                    logger.info(f"Процесс {pid} для задачи {task_id} успешно убит")
+                except Exception as e:
+                    logger.exception(f"Ошибка при попытке убить процесс {pid} для задачи {task_id}: {e}")
+                finally:
+                    # Удаляем процесс из словаря (это может быть небезопасно, но в нашем случае это редко происходит)
+                    try:
+                        active_transcription_processes.pop(task_id, None)
+                    except Exception as e:
+                        logger.warning(f"Ошибка при удалении процесса из словаря: {e}")
+        else:
+            logger.debug(f"Процесс для задачи {task_id} не найден в словаре активных процессов")
+    except Exception as e:
+        logger.exception(f"Ошибка при попытке убить процесс для задачи {task_id}: {e}")
+
+
+async def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
     """Отмена обработки аудио для пользователя
     
     Args:
@@ -1188,6 +1435,8 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
             if set_cancelled_queue(task.id):
                 cancelled_count += 1
                 logger.info(f"Задача {task.id} для пользователя {user_id} успешно отменена")
+                # Убиваем процесс транскрибации для этой задачи
+                _kill_transcription_process(task.id)
             else:
                 logger.warning(f"Не удалось отменить задачу {task.id} для пользователя {user_id}")
     
@@ -1201,6 +1450,8 @@ def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
                     downloads_cancelled += 1
                     cancelled_count += 1
                     logger.info(f"Задача {task.id} из downloads для superuser {user_id} успешно отменена")
+                    # Убиваем процесс транскрибации для этой задачи
+                    _kill_transcription_process(task.id)
                 else:
                     logger.warning(f"Не удалось отменить задачу {task.id} из downloads для superuser {user_id}")
             

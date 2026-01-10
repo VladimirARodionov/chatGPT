@@ -299,7 +299,7 @@ async def process_cancel_confirmation(callback: types.CallbackQuery, state: FSMC
     await callback.message.edit_reply_markup(reply_markup=None)
     
     # Выполняем отмену
-    result, msg = cancel_audio_processing(user_id)
+    result, msg = await cancel_audio_processing(user_id)
     
     # Отвечаем на коллбек
     await callback.answer("Задачи отменены")
