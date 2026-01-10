@@ -34,9 +34,9 @@ RUN . /app/venv/bin/activate && \
     pip install -r requirements.txt
 
 # Создаем и настраиваем директории для данных с правильными правами
-RUN mkdir -p /app/logs /app/temp_audio /app/transcriptions /app/whisper_models && \
+RUN mkdir -p /app/logs /app/temp_audio /app/transcriptions /app/whisper_models /app/downloads && \
     chown -R app:app /app && \
-    chmod -R 755 /app/logs /app/temp_audio /app/transcriptions /app/whisper_models
+    chmod -R 755 /app/logs /app/temp_audio /app/transcriptions /app/whisper_models /app/downloads
 
 # Копируем остальные файлы приложения
 COPY --chown=app:app . .

@@ -9,8 +9,9 @@ from datetime import datetime
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile
 
-from create_bot import TEMP_AUDIO_DIR, TRANSCRIPTION_DIR, MAX_MESSAGE_LENGTH, LOCAL_BOT_API, MAX_CAPTION_LENGTH, \
+from create_bot import TEMP_AUDIO_DIR, DOWNLOADS_DIR, TRANSCRIPTION_DIR, MAX_MESSAGE_LENGTH, LOCAL_BOT_API, MAX_CAPTION_LENGTH, \
     MAX_FILE_SIZE, bot, LOCAL_BOT_API_FILES_PATH
+from db_service import is_file_in_queue
 
 logger = logging.getLogger(__name__)
 
@@ -164,13 +165,15 @@ def save_transcription_to_file(text, user_id, original_file_name=None, username=
     return filename
 
 # Функция для очистки временных файлов
-def cleanup_temp_files(file_path=None, older_than_hours=24):
+def cleanup_temp_files(file_path=None, older_than_hours=24, exclude_files=None, skip_downloads=True):
     """
     Удаляет временные файлы после обработки аудио
 
     Args:
         file_path: Конкретный файл для удаления (если указан)
         older_than_hours: Удалить все файлы старше указанного количества часов
+        exclude_files: Список путей файлов, которые не нужно удалять (например, файлы, которые еще загружаются)
+        skip_downloads: Если True, не удалять файлы из папки downloads (используется при стартовой очистке)
     """
     try:
         # Если указан конкретный файл, удаляем его
@@ -179,30 +182,75 @@ def cleanup_temp_files(file_path=None, older_than_hours=24):
             logger.info(f"Удален временный файл: {file_path}")
             return
 
-        # Если файл не указан, очищаем старые файлы
-        if not os.path.exists(TEMP_AUDIO_DIR):
-            return
-
+        # Если файл не указан, очищаем старые файлы из обеих директорий
         current_time = datetime.now()
         count_removed = 0
+        
+        # Очищаем файлы из temp_audio
+        if os.path.exists(TEMP_AUDIO_DIR):
+            for filename in os.listdir(TEMP_AUDIO_DIR):
+                file_path = os.path.join(TEMP_AUDIO_DIR, filename)
 
-        for filename in os.listdir(TEMP_AUDIO_DIR):
-            file_path = os.path.join(TEMP_AUDIO_DIR, filename)
+                # Проверяем, что это файл, а не директория
+                if os.path.isfile(file_path):
+                    # Получаем время последнего изменения файла
+                    file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    # Вычисляем, сколько часов прошло
+                    age_hours = (current_time - file_mod_time).total_seconds() / 3600
 
-            # Проверяем, что это файл, а не директория
-            if os.path.isfile(file_path):
-                # Получаем время последнего изменения файла
-                file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-                # Вычисляем, сколько часов прошло
-                age_hours = (current_time - file_mod_time).total_seconds() / 3600
+                    # Если файл старше указанного времени, удаляем его
+                    if age_hours > older_than_hours:
+                        os.remove(file_path)
+                        count_removed += 1
+        
+        # Очищаем файлы из downloads (если не пропущено)
+        if not skip_downloads and os.path.exists(DOWNLOADS_DIR):
+            # Нормализуем список исключаемых файлов для сравнения
+            exclude_paths = set()
+            if exclude_files:
+                for exclude_path in exclude_files:
+                    try:
+                        exclude_paths.add(os.path.normpath(os.path.abspath(exclude_path)))
+                    except Exception:
+                        pass
+            
+            for filename in os.listdir(DOWNLOADS_DIR):
+                file_path = os.path.join(DOWNLOADS_DIR, filename)
 
-                # Если файл старше указанного времени, удаляем его
-                if age_hours > older_than_hours:
-                    os.remove(file_path)
-                    count_removed += 1
+                # Проверяем, что это файл, а не директория
+                if os.path.isfile(file_path):
+                    # Нормализуем путь для сравнения
+                    normalized_path = os.path.normpath(os.path.abspath(file_path))
+                    
+                    # Проверяем, находится ли файл в списке исключений (например, загружается)
+                    if normalized_path in exclude_paths:
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он еще загружается")
+                        continue
+                    
+                    # Проверяем, находится ли файл в очереди на обработку
+                    # Не удаляем файлы, которые еще не обработаны
+                    if is_file_in_queue(file_path):
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он находится в очереди на обработку")
+                        continue
+                    
+                    # Получаем время последнего изменения файла
+                    file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    # Вычисляем, сколько часов прошло с последнего изменения
+                    age_hours = (current_time - file_mod_time).total_seconds() / 3600
+                    
+                    # Дополнительная защита: не удаляем файлы, которые были изменены недавно (в последний час)
+                    # Это защищает файлы, которые только что были скопированы в папку, но еще не обнаружены мониторингом
+                    if age_hours < 1.0:
+                        logger.debug(f"Пропускаем файл {filename} из downloads - он был изменен недавно ({age_hours:.2f} часов назад)")
+                        continue
+
+                    # Если файл старше указанного времени, удаляем его
+                    if age_hours > older_than_hours:
+                        os.remove(file_path)
+                        count_removed += 1
 
         if count_removed > 0:
-            logger.info(f"Очищено {count_removed} временных файлов старше {older_than_hours} часов")
+            logger.info(f"Очищено {count_removed} файлов старше {older_than_hours} часов из {TEMP_AUDIO_DIR} и {DOWNLOADS_DIR}")
     except Exception as e:
         logger.exception(f"Ошибка при очистке временных файлов: {e}")
 

@@ -13,9 +13,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-from audio_service import thread_executor, \
+from audio_service import process_executor, \
     handle_audio_service, \
-    init_monitoring, cancel_audio_processing, background_processor
+    init_monitoring, init_downloads_monitoring, cancel_audio_processing, background_processor
 from create_bot import env_config, bot, WHISPER_MODEL, WHISPER_MODELS_DIR, MAX_MESSAGE_LENGTH, \
     USE_LOCAL_WHISPER
 from db_service import get_cmd_status, check_message_limit, get_all_from_queue, reset_active_tasks
@@ -187,7 +187,7 @@ async def cmd_queue(message: types.Message):
     # Добавляем информацию о состоянии фоновых процессов
     queue_info += f"\n🖥 <b>Системная информация:</b>\n"
     queue_info += f"- Фоновый обработчик: {processor_status}\n"
-    queue_info += f"- Рабочих потоков: {thread_executor._max_workers}\n"
+    queue_info += f"- Рабочих процессов: {process_executor._max_workers}\n"
     
     # Если обработчик требует перезапуска, запускаем его и уведомляем пользователя
     if restart_needed:
@@ -299,7 +299,7 @@ async def process_cancel_confirmation(callback: types.CallbackQuery, state: FSMC
     await callback.message.edit_reply_markup(reply_markup=None)
     
     # Выполняем отмену
-    result, msg = cancel_audio_processing(user_id)
+    result, msg = await cancel_audio_processing(user_id)
     
     # Отвечаем на коллбек
     await callback.answer("Задачи отменены")
@@ -427,7 +427,8 @@ async def main():
             logger.info(f'Сброшено {reset_count} активных задач из предыдущего запуска')
         
         # Очищаем старые временные файлы при запуске
-        cleanup_temp_files(older_than_hours=24)
+        # Пропускаем очистку downloads, так как мониторинг еще не запущен и файлы могут быть не в очереди
+        cleanup_temp_files(older_than_hours=24, skip_downloads=True)
         logger.info('Выполнена очистка старых временных файлов')
         
         # Запускаем фоновый обработчик очереди
@@ -439,6 +440,10 @@ async def main():
         # Инициализируем мониторинг фонового обработчика
         init_monitoring()
         logger.info('Инициализирован мониторинг фонового обработчика')
+        
+        # Инициализируем мониторинг папки downloads
+        init_downloads_monitoring()
+        logger.info('Инициализирован мониторинг папки downloads')
         
         # Устанавливаем команды в меню бота
         await set_commands()
