@@ -15,7 +15,7 @@ from audio_utils import predict_processing_time, should_use_smaller_model, conve
 from create_bot import MAX_FILE_SIZE, bot, MAX_MESSAGE_LENGTH, USE_LOCAL_WHISPER, TEMP_AUDIO_DIR, DOWNLOADS_DIR, \
     LOCAL_BOT_API, env_config, WHISPER_MODEL, STANDARD_API_LIMIT, superusers
 from db_service import check_message_limit, get_queue, add_to_queue, set_active_queue, set_finished_queue, \
-    set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks, is_task_cancelled
+    set_cancelled_queue, get_db_session, get_first_from_queue, get_active_tasks, reset_active_tasks
 from files_service import cleanup_temp_files, save_transcription_to_file, download_voice, \
     get_file_path_direct, download_large_file_direct, send_file_safely
 from models import TranscribeQueue
@@ -399,15 +399,11 @@ def _run_transcribe_in_process(file_path, condition_on_previous_text, task_id, r
 def _transcribe_audio_sync(file_path, condition_on_previous_text=False, use_local_whisper=USE_LOCAL_WHISPER, task_id=None):
     """
     Синхронная обертка для транскрибации аудио, которая может быть выполнена в отдельном процессе.
-    Периодически проверяет, не отменена ли задача, и прерывает транскрибацию при отмене.
+    Примечание: проверка отмены через БД не выполняется здесь, так как сессии SQLAlchemy нельзя использовать
+    из разных процессов. Процесс будет убит при отмене задачи из основного процесса.
     """
     try:
         if use_local_whisper:
-            # Проверяем отмену перед началом транскрибации
-            if task_id is not None and is_task_cancelled(task_id):
-                logger.info(f"Задача {task_id} была отменена перед транскрибацией")
-                return None
-            
             # Конвертируем в нужный формат для Whisper если нужно
             try:
                 # Для синхронной версии нужно использовать синхронную конвертацию
@@ -422,23 +418,14 @@ def _transcribe_audio_sync(file_path, condition_on_previous_text=False, use_loca
                 logger.error(f"Файл не существует или пуст: {converted_file}")
                 return None
 
-            # Проверяем отмену перед запуском транскрибации
-            if task_id is not None and is_task_cancelled(task_id):
-                logger.info(f"Задача {task_id} была отменена перед запуском транскрибации")
-                return None
-
             # Используем локальную модель Whisper (синхронно через asyncio.run)
             # В процессе можно использовать asyncio.run, так как у процесса свой event loop
+            # Если задача будет отменена, процесс будет убит из основного процесса
             transcription = asyncio.run(transcribe_with_whisper(
                 converted_file,
                 model_name=WHISPER_MODEL,
                 condition_on_previous_text=condition_on_previous_text
             ))
-
-            # Проверяем отмену после транскрибации
-            if task_id is not None and is_task_cancelled(task_id):
-                logger.info(f"Задача {task_id} была отменена после транскрибации, игнорируем результат")
-                return None
 
             return transcription
         else:
@@ -917,6 +904,13 @@ async def background_processor():
                                 # Удаляем временные файлы
                                 try:
                                     cleanup_temp_files(file_path)
+                                    # Если это файл из downloads, удаляем его напрямую
+                                    if is_downloads_file and os.path.exists(file_path):
+                                        try:
+                                            os.remove(file_path)
+                                            logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                        except Exception as e:
+                                            logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                                 except Exception as e:
                                     logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
 
@@ -1016,6 +1010,13 @@ async def background_processor():
                             await processing_msg.edit_text(cancel_message)
                             if is_downloads_file:
                                 logger.info(f"[Downloads] Обработка файла {file_name} была отменена перед получением результата")
+                                # Удаляем файл из downloads при отмене
+                                try:
+                                    if os.path.exists(file_path):
+                                        os.remove(file_path)
+                                        logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                except Exception as e:
+                                    logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                             set_cancelled_queue(active_task.id)
                             continue
 
@@ -1032,6 +1033,13 @@ async def background_processor():
                                 await processing_msg.edit_text(cancel_message)
                                 if is_downloads_file:
                                     logger.info(f"[Downloads] Обработка файла {file_name} была отменена, процесс убит")
+                                    # Удаляем файл из downloads при отмене
+                                    try:
+                                        if os.path.exists(file_path):
+                                            os.remove(file_path)
+                                            logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                    except Exception as e:
+                                        logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                                 set_cancelled_queue(active_task.id)
                                 continue
                         
@@ -1043,6 +1051,13 @@ async def background_processor():
                         await processing_msg.edit_text(cancel_message)
                         if is_downloads_file:
                             logger.info(f"[Downloads] Обработка файла {file_name} была отменена")
+                            # Удаляем файл из downloads при отмене
+                            try:
+                                if os.path.exists(file_path):
+                                    os.remove(file_path)
+                                    logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                            except Exception as e:
+                                logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                         set_cancelled_queue(active_task.id)
                         continue
                     except Exception as transcribe_error:
@@ -1452,6 +1467,13 @@ async def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
                     logger.info(f"Задача {task.id} из downloads для superuser {user_id} успешно отменена")
                     # Убиваем процесс транскрибации для этой задачи
                     _kill_transcription_process(task.id)
+                    # Удаляем файл из downloads при отмене
+                    try:
+                        if task.file_path and os.path.exists(task.file_path):
+                            os.remove(task.file_path)
+                            logger.info(f"[Downloads] Файл {task.file_name} удален из папки downloads после отмены")
+                    except Exception as e:
+                        logger.exception(f"Ошибка при удалении файла {task.file_name} из downloads: {e}")
                 else:
                     logger.warning(f"Не удалось отменить задачу {task.id} из downloads для superuser {user_id}")
             
