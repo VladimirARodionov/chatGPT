@@ -905,12 +905,32 @@ async def background_processor():
                                 try:
                                     cleanup_temp_files(file_path)
                                     # Если это файл из downloads, удаляем его напрямую
-                                    if is_downloads_file and os.path.exists(file_path):
-                                        try:
-                                            os.remove(file_path)
-                                            logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
-                                        except Exception as e:
-                                            logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
+                                    if is_downloads_file:
+                                        # Небольшая задержка, чтобы процесс успел освободить файл
+                                        await asyncio.sleep(1)
+                                        # Нормализуем путь к файлу
+                                        if not os.path.isabs(file_path):
+                                            file_path = os.path.join(DOWNLOADS_DIR, os.path.basename(file_path))
+                                        else:
+                                            file_path = os.path.normpath(os.path.abspath(file_path))
+                                        
+                                        # Пытаемся удалить файл с повторными попытками
+                                        max_retries = 3
+                                        for attempt in range(max_retries):
+                                            try:
+                                                if os.path.exists(file_path):
+                                                    os.remove(file_path)
+                                                    logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                                    break
+                                            except PermissionError as e:
+                                                if attempt < max_retries - 1:
+                                                    logger.warning(f"Попытка {attempt + 1}: Не удалось удалить файл {file_name} из downloads (файл еще используется), повтор через 1 секунду...")
+                                                    await asyncio.sleep(1)
+                                                else:
+                                                    logger.exception(f"Ошибка при удалении файла {file_name} из downloads после {max_retries} попыток: {e}")
+                                            except Exception as e:
+                                                logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
+                                                break
                                 except Exception as e:
                                     logger.exception(f"Ошибка при удалении временных файлов после отмены: {e}")
 
@@ -1011,10 +1031,32 @@ async def background_processor():
                             if is_downloads_file:
                                 logger.info(f"[Downloads] Обработка файла {file_name} была отменена перед получением результата")
                                 # Удаляем файл из downloads при отмене
+                                # Небольшая задержка, чтобы процесс успел освободить файл
+                                await asyncio.sleep(1)
                                 try:
-                                    if os.path.exists(file_path):
-                                        os.remove(file_path)
-                                        logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                    # Нормализуем путь к файлу
+                                    if not os.path.isabs(file_path):
+                                        file_path = os.path.join(DOWNLOADS_DIR, os.path.basename(file_path))
+                                    else:
+                                        file_path = os.path.normpath(os.path.abspath(file_path))
+                                    
+                                    # Пытаемся удалить файл с повторными попытками
+                                    max_retries = 3
+                                    for attempt in range(max_retries):
+                                        try:
+                                            if os.path.exists(file_path):
+                                                os.remove(file_path)
+                                                logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                                break
+                                        except PermissionError as e:
+                                            if attempt < max_retries - 1:
+                                                logger.warning(f"Попытка {attempt + 1}: Не удалось удалить файл {file_name} из downloads (файл еще используется), повтор через 1 секунду...")
+                                                await asyncio.sleep(1)
+                                            else:
+                                                logger.exception(f"Ошибка при удалении файла {file_name} из downloads после {max_retries} попыток: {e}")
+                                        except Exception as e:
+                                            logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
+                                            break
                                 except Exception as e:
                                     logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                             set_cancelled_queue(active_task.id)
@@ -1052,10 +1094,33 @@ async def background_processor():
                         if is_downloads_file:
                             logger.info(f"[Downloads] Обработка файла {file_name} была отменена")
                             # Удаляем файл из downloads при отмене
+                            # Небольшая задержка, чтобы процесс успел освободить файл
+                            await asyncio.sleep(1)
                             try:
-                                if os.path.exists(file_path):
-                                    os.remove(file_path)
-                                    logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                # Нормализуем путь к файлу
+                                file_path_to_delete = file_path
+                                if not os.path.isabs(file_path_to_delete):
+                                    file_path_to_delete = os.path.join(DOWNLOADS_DIR, os.path.basename(file_path_to_delete))
+                                else:
+                                    file_path_to_delete = os.path.normpath(os.path.abspath(file_path_to_delete))
+                                
+                                # Пытаемся удалить файл с повторными попытками
+                                max_retries = 3
+                                for attempt in range(max_retries):
+                                    try:
+                                        if os.path.exists(file_path_to_delete):
+                                            os.remove(file_path_to_delete)
+                                            logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                            break
+                                    except PermissionError as e:
+                                        if attempt < max_retries - 1:
+                                            logger.warning(f"Попытка {attempt + 1}: Не удалось удалить файл {file_name} из downloads (файл еще используется), повтор через 1 секунду...")
+                                            await asyncio.sleep(1)
+                                        else:
+                                            logger.exception(f"Ошибка при удалении файла {file_name} из downloads после {max_retries} попыток: {e}")
+                                    except Exception as e:
+                                        logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
+                                        break
                             except Exception as e:
                                 logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                         set_cancelled_queue(active_task.id)
@@ -1468,10 +1533,34 @@ async def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
                     # Убиваем процесс транскрибации для этой задачи
                     _kill_transcription_process(task.id)
                     # Удаляем файл из downloads при отмене
+                    # Небольшая задержка, чтобы процесс успел освободить файл
+                    await asyncio.sleep(1)
                     try:
-                        if task.file_path and os.path.exists(task.file_path):
-                            os.remove(task.file_path)
-                            logger.info(f"[Downloads] Файл {task.file_name} удален из папки downloads после отмены")
+                        if task.file_path:
+                            # Нормализуем путь к файлу
+                            file_path_to_delete = task.file_path
+                            if not os.path.isabs(file_path_to_delete):
+                                file_path_to_delete = os.path.join(DOWNLOADS_DIR, os.path.basename(file_path_to_delete))
+                            else:
+                                file_path_to_delete = os.path.normpath(os.path.abspath(file_path_to_delete))
+                            
+                            # Пытаемся удалить файл с повторными попытками
+                            max_retries = 3
+                            for attempt in range(max_retries):
+                                try:
+                                    if os.path.exists(file_path_to_delete):
+                                        os.remove(file_path_to_delete)
+                                        logger.info(f"[Downloads] Файл {task.file_name} удален из папки downloads после отмены")
+                                        break
+                                except PermissionError as e:
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"Попытка {attempt + 1}: Не удалось удалить файл {task.file_name} из downloads (файл еще используется), повтор через 1 секунду...")
+                                        await asyncio.sleep(1)
+                                    else:
+                                        logger.exception(f"Ошибка при удалении файла {task.file_name} из downloads после {max_retries} попыток: {e}")
+                                except Exception as e:
+                                    logger.exception(f"Ошибка при удалении файла {task.file_name} из downloads: {e}")
+                                    break
                     except Exception as e:
                         logger.exception(f"Ошибка при удалении файла {task.file_name} из downloads: {e}")
                 else:
