@@ -806,7 +806,9 @@ async def background_processor():
                             self._exception = None
                         
                         def done(self):
-                            return self._done or not self.process.is_alive()
+                            # Возвращаем True только если результат получен или произошла ошибка
+                            # Не полагаемся на is_alive(), так как процесс может завершиться до получения результата
+                            return self._done
                         
                         def cancel(self):
                             """Пытается убить процесс (синхронный метод)"""
@@ -832,51 +834,109 @@ async def background_processor():
                             return True
                         
                         async def get_result(self):
-                            """Получает результат из очереди (асинхронный метод)"""
+                            """Получает результат из очереди (асинхронный метод)
+                            
+                            Ожидает завершения процесса транскрибации и получения результата.
+                            Не имеет таймаута, так как транскрибация больших файлов может длиться часами.
+                            """
                             try:
-                                while self.process.is_alive():
+                                loop = asyncio.get_event_loop()
+                                
+                                # Ждем завершения процесса или получения результата
+                                # Не устанавливаем таймаут, так как транскрибация может длиться часами
+                                while True:
+                                    # Пытаемся получить результат из очереди (неблокирующий вызов)
                                     try:
-                                        # Проверяем очередь результатов
-                                        if not self.result_queue.empty():
-                                            result = self.result_queue.get_nowait()
+                                        # Используем run_in_executor для неблокирующего get_nowait
+                                        def try_get_result():
+                                            try:
+                                                if not self.result_queue.empty():
+                                                    return self.result_queue.get_nowait()
+                                            except (EOFError, OSError):
+                                                pass
+                                            return None
+                                        
+                                        result = await loop.run_in_executor(None, try_get_result)
+                                        if result is not None:
                                             self._result = result
                                             self._done = True
+                                            logger.info(f"Результат получен для задачи {self.task_id}")
                                             return result
                                         
-                                        # Проверяем очередь ошибок
-                                        if not self.error_queue.empty():
-                                            error = self.error_queue.get_nowait()
+                                        # Пытаемся получить ошибку из очереди
+                                        def try_get_error():
+                                            try:
+                                                if not self.error_queue.empty():
+                                                    return self.error_queue.get_nowait()
+                                            except (EOFError, OSError):
+                                                pass
+                                            return None
+                                        
+                                        error = await loop.run_in_executor(None, try_get_error)
+                                        if error is not None:
                                             self._exception = error
                                             self._done = True
+                                            logger.error(f"Ошибка получена для задачи {self.task_id}: {error}")
                                             raise error
                                         
-                                        # Небольшая пауза перед следующей проверкой
-                                        await asyncio.sleep(0.5)
-                                    except (EOFError, OSError):
-                                        # Очередь закрыта или недоступна, это нормально
-                                        break
-                                
-                                # Процесс завершился, проверяем очереди еще раз
-                                try:
-                                    if not self.result_queue.empty():
-                                        result = self.result_queue.get_nowait()
-                                        self._result = result
-                                        self._done = True
-                                        return result
+                                    except (EOFError, OSError) as e:
+                                        logger.warning(f"Очередь недоступна для задачи {self.task_id}: {e}")
                                     
-                                    if not self.error_queue.empty():
-                                        error = self.error_queue.get_nowait()
-                                        self._exception = error
-                                        self._done = True
-                                        raise error
-                                except (EOFError, OSError):
-                                    # Очередь закрыта или недоступна, это нормально после завершения процесса
-                                    pass
+                                    # Проверяем, завершился ли процесс
+                                    if not self.process.is_alive():
+                                        # Процесс завершился, делаем финальную попытку получить результат
+                                        logger.debug(f"Процесс для задачи {self.task_id} завершился (exitcode={self.process.exitcode}), делаем финальную проверку")
+                                        
+                                        # Ждем немного, чтобы результат успел попасть в очередь
+                                        await asyncio.sleep(1.0)
+                                        
+                                        # Финальная попытка получить результат
+                                        try:
+                                            def final_get_result():
+                                                try:
+                                                    if not self.result_queue.empty():
+                                                        return self.result_queue.get_nowait()
+                                                except (EOFError, OSError):
+                                                    pass
+                                                return None
+                                            
+                                            result = await loop.run_in_executor(None, final_get_result)
+                                            if result is not None:
+                                                self._result = result
+                                                self._done = True
+                                                logger.info(f"Результат получен после завершения процесса для задачи {self.task_id}")
+                                                return result
+                                            
+                                            # Финальная попытка получить ошибку
+                                            def final_get_error():
+                                                try:
+                                                    if not self.error_queue.empty():
+                                                        return self.error_queue.get_nowait()
+                                                except (EOFError, OSError):
+                                                    pass
+                                                return None
+                                            
+                                            error = await loop.run_in_executor(None, final_get_error)
+                                            if error is not None:
+                                                self._exception = error
+                                                self._done = True
+                                                logger.error(f"Ошибка получена после завершения процесса для задачи {self.task_id}: {error}")
+                                                raise error
+                                        except (EOFError, OSError):
+                                            pass
+                                        
+                                        # Процесс завершился, но результат не получен
+                                        break
+                                    
+                                    # Небольшая пауза перед следующей проверкой
+                                    await asyncio.sleep(0.5)
                                 
                                 # Процесс завершился, но результат не получен
                                 self._done = True
                                 if self.process.exitcode != 0 and self.process.exitcode is not None:
                                     raise RuntimeError(f"Процесс транскрибации завершился с кодом {self.process.exitcode}")
+                                
+                                logger.warning(f"Процесс для задачи {self.task_id} завершился, но результат не был получен из очереди")
                                 return None
                             finally:
                                 # Удаляем процесс из словаря активных процессов после получения результата или ошибки
@@ -892,6 +952,14 @@ async def background_processor():
                     cancelled = False
                     
                     while not future.done():
+                        # Проверяем, завершился ли процесс, но результат еще не получен
+                        # В этом случае даем немного времени и выходим из цикла, чтобы вызвать get_result()
+                        if not transcribe_process.is_alive() and not future._done:
+                            logger.info(f"Процесс для задачи {active_task.id} завершился, но результат еще не получен. Выходим из цикла ожидания.")
+                            # Даем немного времени на то, чтобы результат попал в очередь
+                            await asyncio.sleep(2.0)
+                            # Выходим из цикла, чтобы вызвать get_result() после цикла
+                            break
                         # Проверяем, не отменена ли задача
                         with get_db_session() as session:
                             task_status = session.query(TranscribeQueue).filter(TranscribeQueue.id == active_task.id).first()
