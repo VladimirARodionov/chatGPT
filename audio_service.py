@@ -610,6 +610,7 @@ async def background_processor():
                 
                 # Отмечаем задачу как активную
                 set_active_queue(active_task.id)
+                logger.info(f"Начинаем обработку задачи {active_task.id} (файл: {active_task.file_name})")
                     
                 # Получаем информацию о задаче
                 user_id = active_task.user_id
@@ -1051,12 +1052,24 @@ async def background_processor():
 
                     # Если задача была отменена, пропускаем дальнейшую обработку
                     if cancelled:
+                        logger.info(f"Задача {active_task.id} была отменена, завершаем обработку и переходим к следующей задаче")
                         # Процесс уже убит в цикле выше
                         # Помечаем задачу как отмененную в базе данных
-                        set_cancelled_queue(active_task.id)
+                        cancelled_success = set_cancelled_queue(active_task.id)
+                        if not cancelled_success:
+                            logger.warning(f"Не удалось пометить задачу {active_task.id} как отмененную в базе данных")
                         # Очищаем ссылку на процесс
                         async with processes_lock:
                             active_transcription_processes.pop(active_task.id, None)
+                        # Отменяем задачу получения результата, если она еще не завершена
+                        if not result_task.done():
+                            result_task.cancel()
+                            try:
+                                await result_task
+                            except (asyncio.CancelledError, Exception) as e:
+                                logger.debug(f"Исключение при отмене result_task для задачи {active_task.id}: {e}")
+                        logger.info(f"Обработка отмененной задачи {active_task.id} завершена, переходим к следующей задаче")
+                        # Явно переходим к следующей итерации цикла
                         continue
 
                     # Получаем результат из задачи
