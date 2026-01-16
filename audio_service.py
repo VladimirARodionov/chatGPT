@@ -590,6 +590,8 @@ async def background_processor():
                     active_task = get_first_from_queue()
                     # Если задача успешно получена, сбрасываем счетчик ошибок
                     error_counter = 0
+                    if active_task:
+                        logger.debug(f"Получена задача {active_task.id} из очереди для обработки")
                 except Exception as db_error:
                     logger.error(f"Ошибка при получении задачи из базы данных: {db_error}")
                     error_counter += 1
@@ -605,6 +607,7 @@ async def background_processor():
                 
                 # Если нет задач, ждем 1 секунду и проверяем снова
                 if not active_task:
+                    logger.debug("Нет задач в очереди, ожидаем 1 секунду")
                     await asyncio.sleep(1)
                     continue
                 
@@ -1053,24 +1056,36 @@ async def background_processor():
                     # Если задача была отменена, пропускаем дальнейшую обработку
                     if cancelled:
                         logger.info(f"Задача {active_task.id} была отменена, завершаем обработку и переходим к следующей задаче")
-                        # Процесс уже убит в цикле выше
-                        # Помечаем задачу как отмененную в базе данных
-                        cancelled_success = set_cancelled_queue(active_task.id)
-                        if not cancelled_success:
-                            logger.warning(f"Не удалось пометить задачу {active_task.id} как отмененную в базе данных")
-                        # Очищаем ссылку на процесс
-                        async with processes_lock:
-                            active_transcription_processes.pop(active_task.id, None)
-                        # Отменяем задачу получения результата, если она еще не завершена
-                        if not result_task.done():
-                            result_task.cancel()
-                            try:
-                                await result_task
-                            except (asyncio.CancelledError, Exception) as e:
-                                logger.debug(f"Исключение при отмене result_task для задачи {active_task.id}: {e}")
-                        logger.info(f"Обработка отмененной задачи {active_task.id} завершена, переходим к следующей задаче")
-                        # Явно переходим к следующей итерации цикла
-                        continue
+                        try:
+                            # Процесс уже убит в цикле выше
+                            # Помечаем задачу как отмененную в базе данных
+                            cancelled_success = set_cancelled_queue(active_task.id)
+                            if not cancelled_success:
+                                logger.warning(f"Не удалось пометить задачу {active_task.id} как отмененную в базе данных")
+                            else:
+                                logger.info(f"Задача {active_task.id} успешно помечена как отмененная в базе данных")
+                            
+                            # Очищаем ссылку на процесс
+                            async with processes_lock:
+                                active_transcription_processes.pop(active_task.id, None)
+                            
+                            # Отменяем задачу получения результата, если она еще не завершена
+                            if not result_task.done():
+                                result_task.cancel()
+                                try:
+                                    await result_task
+                                except (asyncio.CancelledError, Exception) as e:
+                                    logger.debug(f"Исключение при отмене result_task для задачи {active_task.id}: {e}")
+                            
+                            logger.info(f"Обработка отмененной задачи {active_task.id} завершена, переходим к следующей задаче")
+                        except Exception as cancel_error:
+                            logger.exception(f"Ошибка при завершении обработки отмененной задачи {active_task.id}: {cancel_error}")
+                        finally:
+                            # Небольшая задержка, чтобы дать базе данных время обновиться
+                            await asyncio.sleep(0.1)
+                            # Явно переходим к следующей итерации цикла, даже если была ошибка
+                            logger.debug(f"Возвращаемся к началу цикла после отмены задачи {active_task.id}")
+                            continue
 
                     # Получаем результат из задачи
                     transcription = None
