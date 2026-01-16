@@ -607,7 +607,6 @@ async def background_processor():
                 
                 # Если нет задач, ждем 1 секунду и проверяем снова
                 if not active_task:
-                    logger.debug("Нет задач в очереди, ожидаем 1 секунду")
                     await asyncio.sleep(1)
                     continue
                 
@@ -973,6 +972,9 @@ async def background_processor():
                                         try:
                                             os.remove(file_path)
                                             logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                            # Удаляем файл из списка обработанных, чтобы он мог быть обработан снова при повторной загрузке
+                                            processed_downloads_files.discard(file_path)
+                                            logger.debug(f"[Downloads] Файл {file_name} удален из списка обработанных файлов")
                                         except Exception as e:
                                             logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                                 except Exception as e:
@@ -1103,6 +1105,9 @@ async def background_processor():
                                 if os.path.exists(file_path):
                                     os.remove(file_path)
                                     logger.info(f"[Downloads] Файл {file_name} удален из папки downloads после отмены")
+                                    # Удаляем файл из списка обработанных, чтобы он мог быть обработан снова при повторной загрузке
+                                    processed_downloads_files.discard(file_path)
+                                    logger.debug(f"[Downloads] Файл {file_name} удален из списка обработанных файлов")
                             except Exception as e:
                                 logger.exception(f"Ошибка при удалении файла {file_name} из downloads: {e}")
                         set_cancelled_queue(active_task.id)
@@ -1519,6 +1524,9 @@ async def cancel_audio_processing(user_id: int) -> tuple[bool, str]:
                         if task.file_path and os.path.exists(task.file_path):
                             os.remove(task.file_path)
                             logger.info(f"[Downloads] Файл {task.file_name} удален из папки downloads после отмены")
+                            # Удаляем файл из списка обработанных, чтобы он мог быть обработан снова при повторной загрузке
+                            processed_downloads_files.discard(task.file_path)
+                            logger.debug(f"[Downloads] Файл {task.file_name} удален из списка обработанных файлов")
                     except Exception as e:
                         logger.exception(f"Ошибка при удалении файла {task.file_name} из downloads: {e}")
                 else:
@@ -1810,6 +1818,16 @@ async def monitor_downloads_folder():
             
             for path in files_to_remove:
                 files_being_uploaded.pop(path, None)
+            
+            # Очищаем устаревшие записи о обработанных файлах (файлы, которых больше нет)
+            processed_to_remove = []
+            for processed_path in list(processed_downloads_files):
+                if not os.path.exists(processed_path):
+                    processed_to_remove.append(processed_path)
+                    logger.debug(f"Удаляем из списка обработанных несуществующий файл: {os.path.basename(processed_path)}")
+            
+            for path in processed_to_remove:
+                processed_downloads_files.discard(path)
             
             # Проверяем каждые 30 секунд
             await asyncio.sleep(30)
